@@ -1,5 +1,7 @@
 # PropMove
 
+<a href="https://www.buymeacoffee.com/yffbptmtaa" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-violet.png" alt="Buy Me A Coffee" style="height: 60px !important;width: 217px !important;" ></a>
+
 PropMove is a tiny Obsidian plugin that automatically moves notes based on frontmatter property values. It listens for note creation and frontmatter updates (including templates) and moves matching notes into configured folders.
 
 ![PropMove Settings](assets/screenshot.png)
