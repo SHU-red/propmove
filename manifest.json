@@ -1,0 +1,10 @@
+{
+    "id": "propmove",
+    "name": "PropMove",
+    "version": "0.0.1",
+    "minAppVersion": "1.5.0",
+    "description": "Move notes based on a frontmatter property value.",
+    "author": "Your Name",
+    "authorUrl": "",
+    "isDesktopOnly": false
+}
