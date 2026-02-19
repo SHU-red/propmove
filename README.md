@@ -12,10 +12,19 @@ PropMove is a tiny Obsidian plugin that automatically moves notes based on front
 - Creates missing target folders automatically.
 - Avoids move loops and conflicts.
 
-## Installation (manual)
+## Installation
 
-1. Copy this folder to `.obsidian/plugins/propmove` in your vault.
-2. In Obsidian, enable the plugin under Community Plugins.
+1. Navigate to your vault's plugin folder:
+   ```bash
+   cd /path/to/your/vault/.obsidian/plugins/
+   ```
+
+2. Clone this repository:
+   ```bash
+   git clone https://github.com/SHU-red/propmove.git
+   ```
+
+3. In Obsidian, go to Settings → Community plugins and enable PropMove.
 
 ## Configuration
 
