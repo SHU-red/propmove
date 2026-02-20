@@ -1,59 +1,68 @@
 # PropMove
 
-<a href="https://www.buymeacoffee.com/yffbptmtaa" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-violet.png" alt="Buy Me A Coffee" style="height: 60px !important;width: 217px !important;" ></a>
+Automatically move notes based on frontmatter properties. **It just works.**
 
-PropMove is a tiny Obsidian plugin that automatically moves notes based on frontmatter property values. It listens for note creation and frontmatter updates (including templates) and moves matching notes into configured folders.
+<a href="https://www.buymeacoffee.com/yffbptmtaa" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-violet.png" alt="Buy Me A Coffee" style="height: 60px !important;width: 217px !important;" ></a>
 
 ![PropMove Settings](assets/screenshot.png)
 
 ## Features
 
-- Move notes on create and metadata changes.
-- Multiple properties, each with value-to-folder mappings.
-- Automatically append unique suffix if filename exists (configurable, ON by default).
-- Creates missing target folders automatically.
-- Avoids move loops and conflicts.
+- **Auto-move on create/update:** Watches frontmatter changes and moves notes automatically
+- **Multiple property mappings:** Define value-to-folder rules per property
+- **Smart conflict handling:** Appends unique suffixes (note 1.md, note 2.md) when targets exist
+- **Ignore folders:** Protect template folders by excluding them from processing
+- **Auto folder creation:** Creates missing target directories automatically
 
 ## Installation
 
-1. Navigate to your vault's plugin folder:
-   ```bash
-   cd /path/to/your/vault/.obsidian/plugins/
-   ```
-
-2. Clone this repository:
-   ```bash
-   git clone https://github.com/SHU-red/propmove.git
-   ```
-
-3. In Obsidian, go to Settings → Community plugins and enable PropMove.
+```bash
+cd /path/to/your/vault/.obsidian/plugins/
+git clone https://github.com/SHU-red/propmove.git
+```
+Enable in Obsidian Settings → Community plugins
 
 ## Configuration
 
-Open PropMove settings and add one or more properties with mappings.
+### Property Mappings
+Set up properties with value-to-folder rules:
 
-Example:
+```
+Property: type
+  • task → Tasks
+  • protocol → Protocols
+  • daily → Daily
 
-Property: `type`
+Property: status
+  • draft → Inbox/Drafts
+  • final → Archive
+```
 
-- `task` -> `Tasks`
-- `protocol` -> `Protocols`
-- `daily` -> `Daily`
+### Ignore Folders
+Prevent files in specific folders from being moved (useful for templates):
 
-Property: `status`
+```
+Ignore Folders:
+  • templates
+  • _archive
+  • drafts/work-in-progress
+```
 
-- `draft` -> `Inbox/Drafts`
-- `final` -> `Archive`
+## How It Works
 
-## Notes
+1. When a note is created or frontmatter changes, PropMove checks its properties
+2. If the note is in an ignored folder, it's skipped
+3. First matching property mapping determines the target folder
+4. If target file exists, a numeric suffix is appended (configurable)
+5. Note is moved to destination; folders created if needed
 
-- By default, if a target note already exists, PropMove automatically appends a numeric suffix (e.g., "note 1.md", "note 2.md") to avoid conflicts. This can be disabled in settings.
-- The first matching property mapping wins.
-- The plugin recursively finds unique filenames until the move succeeds.
+## Settings
 
-## Development
-
-This is a plain Obsidian plugin folder with `manifest.json` and `main.js`.
+| Setting | Default | Description |
+|---------|---------|-------------|
+| Auto-append suffix | ON | Append numbers to avoid conflicts |
+| Ignore Folders | — | Folders to exclude from processing |
+| Properties | — | Property name + value→folder mappings |
 
 ## License
 
