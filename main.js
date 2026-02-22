@@ -9,7 +9,8 @@ const {
 
 const DEFAULT_SETTINGS = {
   properties: [],
-  autoAppendSuffix: true
+  autoAppendSuffix: true,
+  ignoreFolders: []
 };
 
 module.exports = class PropMove extends Plugin {
@@ -70,6 +71,11 @@ module.exports = class PropMove extends Plugin {
   async processFile(filePath) {
     const file = this.app.vault.getAbstractFileByPath(filePath);
     if (!(file instanceof TFile) || file.extension !== "md") {
+      return;
+    }
+
+    // Check if file is in an ignored folder
+    if (this.isFileInIgnoredFolder(filePath)) {
       return;
     }
 
@@ -171,6 +177,29 @@ module.exports = class PropMove extends Plugin {
     }
   }
 
+  isFileInIgnoredFolder(filePath) {
+    const ignoreFolders = Array.isArray(this.settings.ignoreFolders)
+      ? this.settings.ignoreFolders
+      : [];
+
+    for (const ignoreFolder of ignoreFolders) {
+      const normalizedIgnoreFolder = normalizePath(String(ignoreFolder || "").trim());
+      if (!normalizedIgnoreFolder) {
+        continue;
+      }
+
+      const normalizedFilePath = normalizePath(filePath);
+      
+      // Check if the file path starts with the ignore folder
+      if (normalizedFilePath.startsWith(normalizedIgnoreFolder + "/") ||
+          normalizedFilePath === normalizedIgnoreFolder) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
   async generateUniqueFileName(folderPath, fileName) {
     const extension = fileName.split(".").pop();
     const baseName = fileName.slice(0, -(extension.length + 1));
@@ -220,6 +249,11 @@ module.exports = class PropMove extends Plugin {
       name: String(group.name || "").trim(),
       mappings: Array.isArray(group.mappings) ? group.mappings : []
     }));
+
+    // Ensure ignoreFolders is properly initialized
+    if (!Array.isArray(this.settings.ignoreFolders)) {
+      this.settings.ignoreFolders = [];
+    }
   }
 };
 
@@ -249,6 +283,63 @@ class PropMoveSettingTab extends PluginSettingTab {
             await this.plugin.saveSettings();
           })
       );
+
+    containerEl.createEl("hr");
+    containerEl.createEl("h3", { text: "Ignore Folders" });
+    
+    containerEl.createEl("p", {
+      text: "Add folders to exclude files from being moved. Files in these folders will be ignored even if they match a property mapping (e.g., template folders)."
+    });
+
+    const ignoreFolders = Array.isArray(this.plugin.settings.ignoreFolders)
+      ? this.plugin.settings.ignoreFolders
+      : [];
+
+    if (ignoreFolders.length === 0) {
+      containerEl.createEl("p", {
+        text: "No folders are currently ignored.",
+        cls: "setting-item-description"
+      });
+    }
+
+    ignoreFolders.forEach((folderPath, index) => {
+      const setting = new Setting(containerEl).setName(`Ignored Folder ${index + 1}`);
+
+      setting.addText((text) =>
+        text
+          .setPlaceholder("templates")
+          .setValue(folderPath || "")
+          .onChange(async (value) => {
+            ignoreFolders[index] = value;
+            this.plugin.settings.ignoreFolders = ignoreFolders;
+            await this.plugin.saveSettings();
+          })
+      );
+
+      setting.addExtraButton((button) => {
+        button
+          .setIcon("trash")
+          .setTooltip("Remove ignored folder")
+          .onClick(async () => {
+            ignoreFolders.splice(index, 1);
+            this.plugin.settings.ignoreFolders = ignoreFolders;
+            await this.plugin.saveSettings();
+            this.display();
+          });
+      });
+    });
+
+    new Setting(containerEl).addButton((button) => {
+      button
+        .setButtonText("Add ignored folder")
+        .setCta()
+        .onClick(async () => {
+          ignoreFolders.push("");
+          this.plugin.settings.ignoreFolders = ignoreFolders;
+          await this.plugin.saveSettings();
+          this.display();
+        });
+    });
 
     containerEl.createEl("hr");
     containerEl.createEl("h3", { text: "Properties" });
