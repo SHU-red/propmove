@@ -43,6 +43,9 @@ module.exports = class PropMove extends Plugin {
   }
 
   queueProcess(file) {
+    if (this.app.metadataCache.isUserIgnored(file.path)) {
+      return;
+    }
     if (!(file instanceof TFile) || file.extension !== "md") {
       return;
     }
