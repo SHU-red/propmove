@@ -4,13 +4,22 @@ const {
   Setting,
   TFile,
   normalizePath,
-  Notice
+  Notice,
+  Command
 } = require("obsidian");
 
 const DEFAULT_SETTINGS = {
   properties: [],
   autoAppendSuffix: true,
-  ignoreFolders: []
+  ignoreFolders: [],
+  moveOnCreate: true,
+  moveOnMetadataChange: true,
+  moveOnStartup: true,
+  manualTriggerOnly: false,
+  debugLogging: false,
+  processExistingFiles: false,
+  processingDelay: 150,
+  maxFilesPerBatch: 0
 };
 
 module.exports = class PropMove extends Plugin {
@@ -19,20 +28,52 @@ module.exports = class PropMove extends Plugin {
     this.migrateSettings();
     this.pending = new Map();
     this.movingPaths = new Set();
+    this.isStartup = true;
 
     this.addSettingTab(new PropMoveSettingTab(this.app, this));
 
-    this.registerEvent(
-      this.app.vault.on("create", (file) => {
-        this.queueProcess(file);
-      })
-    );
+    // Register manual trigger command
+    this.addCommand({
+      id: "trigger-manual-process",
+      name: "Process files according to property rules",
+      callback: () => this.processAllFiles()
+    });
 
-    this.registerEvent(
-      this.app.metadataCache.on("changed", (file) => {
-        this.queueProcess(file);
-      })
-    );
+    // Register event handlers conditionally based on settings
+    if (this.settings.moveOnCreate && !this.settings.manualTriggerOnly) {
+      this.registerEvent(
+        this.app.vault.on("create", (file) => {
+          if (this.settings.debugLogging) console.log("PropMove: File created, queuing process", file.path);
+          this.queueProcess(file);
+        })
+      );
+    }
+
+    if (this.settings.moveOnMetadataChange && !this.settings.manualTriggerOnly) {
+      this.registerEvent(
+        this.app.metadataCache.on("changed", (file) => {
+          if (this.settings.debugLogging) console.log("PropMove: Metadata changed, queuing process", file.path);
+          
+          // Skip processing during startup if moveOnStartup is disabled
+          if (this.isStartup && !this.settings.moveOnStartup) {
+            if (this.settings.debugLogging) console.log("PropMove: Skipping startup processing for", file.path);
+            return;
+          }
+          
+          this.queueProcess(file);
+        })
+      );
+    }
+
+    // Handle startup processing if enabled
+    if (this.settings.moveOnStartup && !this.settings.manualTriggerOnly) {
+      setTimeout(() => {
+        this.isStartup = false;
+        if (this.settings.debugLogging) console.log("PropMove: Startup complete");
+      }, 2000); // Consider startup complete after 2 seconds
+    } else {
+      this.isStartup = false;
+    }
   }
 
   onunload() {
@@ -63,9 +104,41 @@ module.exports = class PropMove extends Plugin {
     const timeoutId = setTimeout(() => {
       this.pending.delete(file.path);
       this.processFile(file.path);
-    }, 150);
+    }, this.settings.processingDelay);
 
     this.pending.set(file.path, timeoutId);
+  }
+
+  async processAllFiles() {
+    if (this.settings.debugLogging) console.log("PropMove: Starting manual processing of all files");
+    
+    const files = this.app.vault.getMarkdownFiles();
+    let processedCount = 0;
+    const maxFiles = this.settings.maxFilesPerBatch > 0 ? this.settings.maxFilesPerBatch : files.length;
+    
+    for (const file of files) {
+      if (processedCount >= maxFiles) {
+        if (this.settings.debugLogging) console.log("PropMove: Reached maximum files per batch", maxFiles);
+        break;
+      }
+      
+      // Skip files in ignored folders
+      if (this.isFileInIgnoredFolder(file.path)) {
+        if (this.settings.debugLogging) console.log("PropMove: Skipping ignored file", file.path);
+        continue;
+      }
+      
+      try {
+        if (this.settings.debugLogging) console.log("PropMove: Processing file", file.path);
+        await this.processFile(file.path);
+        processedCount++;
+      } catch (error) {
+        console.error("PropMove: Error processing file", file.path, error);
+      }
+    }
+    
+    if (this.settings.debugLogging) console.log(`PropMove: Manual processing complete. Processed ${processedCount} files`);
+    new Notice(`PropMove: Processed ${processedCount} files`);
   }
 
   async processFile(filePath) {
@@ -254,6 +327,29 @@ module.exports = class PropMove extends Plugin {
     if (!Array.isArray(this.settings.ignoreFolders)) {
       this.settings.ignoreFolders = [];
     }
+
+    // Migrate new settings with defaults if they don't exist
+    if (this.settings.moveOnCreate === undefined) {
+      this.settings.moveOnCreate = DEFAULT_SETTINGS.moveOnCreate;
+    }
+    if (this.settings.moveOnMetadataChange === undefined) {
+      this.settings.moveOnMetadataChange = DEFAULT_SETTINGS.moveOnMetadataChange;
+    }
+    if (this.settings.moveOnStartup === undefined) {
+      this.settings.moveOnStartup = DEFAULT_SETTINGS.moveOnStartup;
+    }
+    if (this.settings.manualTriggerOnly === undefined) {
+      this.settings.manualTriggerOnly = DEFAULT_SETTINGS.manualTriggerOnly;
+    }
+    if (this.settings.debugLogging === undefined) {
+      this.settings.debugLogging = DEFAULT_SETTINGS.debugLogging;
+    }
+    if (this.settings.processingDelay === undefined) {
+      this.settings.processingDelay = DEFAULT_SETTINGS.processingDelay;
+    }
+    if (this.settings.maxFilesPerBatch === undefined) {
+      this.settings.maxFilesPerBatch = DEFAULT_SETTINGS.maxFilesPerBatch;
+    }
   }
 };
 
@@ -269,6 +365,78 @@ class PropMoveSettingTab extends PluginSettingTab {
 
     containerEl.createEl("h2", { text: "PropMove" });
 
+    // Manual trigger only setting (master switch)
+    new Setting(containerEl)
+      .setName("Manual trigger only")
+      .setDesc("When enabled, files are only moved when manually triggered. All automatic triggers are disabled.")
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.manualTriggerOnly)
+          .onChange(async (value) => {
+            this.plugin.settings.manualTriggerOnly = value;
+            await this.plugin.saveSettings();
+            this.display(); // Refresh UI to reflect dependent settings state
+          })
+      );
+
+    containerEl.createEl("hr");
+    containerEl.createEl("h3", { text: "Automatic Triggers" });
+
+    containerEl.createEl("p", {
+      text: "Configure when files should be automatically moved based on property changes.",
+      cls: "setting-item-description"
+    });
+
+    // Trigger event settings
+    const triggerSettings = [
+      {
+        name: "Move on file creation",
+        desc: "Move files when they are first created",
+        setting: "moveOnCreate",
+        disabled: this.plugin.settings.manualTriggerOnly
+      },
+      {
+        name: "Move on property change", 
+        desc: "Move files when their frontmatter properties are modified",
+        setting: "moveOnMetadataChange",
+        disabled: this.plugin.settings.manualTriggerOnly
+      },
+      {
+        name: "Move on startup",
+        desc: "Move files when Obsidian starts up (based on current property rules)",
+        setting: "moveOnStartup",
+        disabled: this.plugin.settings.manualTriggerOnly
+      }
+    ];
+
+    triggerSettings.forEach((trigger) => {
+      new Setting(containerEl)
+        .setName(trigger.name)
+        .setDesc(trigger.desc)
+        .addToggle((toggle) =>
+          toggle
+            .setValue(this.plugin.settings[trigger.setting])
+            .setDisabled(trigger.disabled)
+            .onChange(async (value) => {
+              this.plugin.settings[trigger.setting] = value;
+              await this.plugin.saveSettings();
+            })
+        );
+    });
+
+    // Manual trigger button
+    new Setting(containerEl)
+      .addButton((button) =>
+        button
+          .setButtonText("Process all files now")
+          .setCta()
+          .onClick(async () => {
+            await this.plugin.processAllFiles();
+          })
+      );
+
+    containerEl.createEl("hr");
+
     // Auto-append suffix setting
     new Setting(containerEl)
       .setName("Automatically append a unique suffix if filename exists")
@@ -280,6 +448,52 @@ class PropMoveSettingTab extends PluginSettingTab {
           .setValue(this.plugin.settings.autoAppendSuffix)
           .onChange(async (value) => {
             this.plugin.settings.autoAppendSuffix = value;
+            await this.plugin.saveSettings();
+          })
+      );
+
+    containerEl.createEl("hr");
+    
+    // Performance settings
+    containerEl.createEl("h3", { text: "Performance Settings" });
+
+    new Setting(containerEl)
+      .setName("Processing delay (ms)")
+      .setDesc("Delay before processing file changes to allow for batch updates (default: 150ms)")
+      .addText((text) =>
+        text
+          .setPlaceholder("150")
+          .setValue(String(this.plugin.settings.processingDelay || 150))
+          .onChange(async (value) => {
+            const numValue = parseInt(value) || 150;
+            this.plugin.settings.processingDelay = numValue;
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Max files per manual batch")
+      .setDesc("Maximum number of files to process in one manual trigger (0 = no limit)")
+      .addText((text) =>
+        text
+          .setPlaceholder("0")
+          .setValue(String(this.plugin.settings.maxFilesPerBatch || 0))
+          .onChange(async (value) => {
+            const numValue = parseInt(value) || 0;
+            this.plugin.settings.maxFilesPerBatch = numValue;
+            await this.plugin.saveSettings();
+          })
+      );
+
+    // Debug setting
+    new Setting(containerEl)
+      .setName("Enable debug logging")
+      .setDesc("Log detailed information to console for troubleshooting")
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.debugLogging)
+          .onChange(async (value) => {
+            this.plugin.settings.debugLogging = value;
             await this.plugin.saveSettings();
           })
       );
