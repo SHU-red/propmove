@@ -85,6 +85,34 @@ class FileProcessor {
   }
 
   /**
+   * Interpolate variables in folder path template
+   * Replaces {propertyName} with values from frontmatter
+   * @param {string} path - Path template with {variable} placeholders
+   * @param {Object} frontmatter - Frontmatter object with properties
+   * @returns {string} Interpolated path
+   */
+  interpolateVariables(path, frontmatter) {
+    if (!path || typeof path !== 'string') return path;
+
+    return path.replace(/{(\w+)}/g, (match, propName) => {
+      const value = frontmatter[propName];
+      if (value === null || value === undefined) {
+        this.logger.debug(`[INTERPOLATE] Property '${propName}' not found in frontmatter, keeping literal: ${match}`);
+        return match; // Keep the placeholder if property not found
+      }
+
+      const normalized = String(value).trim();
+      if (normalized.length === 0) {
+        this.logger.debug(`[INTERPOLATE] Property '${propName}' is empty, keeping literal: ${match}`);
+        return match;
+      }
+
+      this.logger.debug(`[INTERPOLATE] Replaced {${propName}} with '${normalized}'`);
+      return normalized;
+    });
+  }
+
+  /**
    * Preview what would happen if a file is processed
    * @returns {Object|null} Move preview or null if no move needed
    */
@@ -100,7 +128,9 @@ class FileProcessor {
       return null;
     }
 
-    const normalizedFolder = normalizePath(targetFolder);
+    // Interpolate variables in the target folder
+    const interpolatedFolder = this.interpolateVariables(targetFolder, frontmatter);
+    const normalizedFolder = normalizePath(interpolatedFolder);
     const targetPath = normalizePath(`${normalizedFolder}/${file.name}`);
 
     if (file.path === targetPath) {
@@ -116,13 +146,17 @@ class FileProcessor {
           currentPath: file.path,
           targetPath: targetPath,
           targetFolder: normalizedFolder,
-          fileName: file.name
+          fileName: file.name,
+          template: targetFolder,
+          interpolated: interpolatedFolder
         };
       } else {
         return {
           action: "skip",
           reason: "target_exists",
-          targetPath: targetPath
+          targetPath: targetPath,
+          template: targetFolder,
+          interpolated: interpolatedFolder
         };
       }
     }
@@ -131,7 +165,9 @@ class FileProcessor {
       action: "move",
       currentPath: file.path,
       targetPath: targetPath,
-      targetFolder: normalizedFolder
+      targetFolder: normalizedFolder,
+      template: targetFolder,
+      interpolated: interpolatedFolder
     };
   }
 
@@ -139,7 +175,14 @@ class FileProcessor {
    * Execute a file move operation with comprehensive error handling
    */
   async moveFile(file, targetFolder) {
-    const normalizedFolder = normalizePath(targetFolder);
+    // Interpolate variables from file's frontmatter
+    const cache = this.app.metadataCache.getFileCache(file);
+    const frontmatter = cache ? cache.frontmatter : null;
+    const interpolatedFolder = frontmatter 
+      ? this.interpolateVariables(targetFolder, frontmatter)
+      : targetFolder;
+
+    const normalizedFolder = normalizePath(interpolatedFolder);
     const targetPath = normalizePath(`${normalizedFolder}/${file.name}`);
 
     if (file.path === targetPath) {
@@ -474,9 +517,15 @@ module.exports = class PropMove extends Plugin {
     // Log preview results
     previews.forEach(p => {
       if (p.action === "move") {
-        this.logger.info(`[PREVIEW] MOVE: ${p.file} → ${p.targetPath}`);
+        const pathInfo = p.template && p.template !== p.interpolated 
+          ? `${p.file} → ${p.targetPath} (template: ${p.template} → ${p.interpolated})`
+          : `${p.file} → ${p.targetPath}`;
+        this.logger.info(`[PREVIEW] MOVE: ${pathInfo}`);
       } else if (p.action === "move_with_suffix") {
-        this.logger.info(`[PREVIEW] MOVE (with suffix): ${p.file} → ${p.targetFolder}/`);
+        const pathInfo = p.template && p.template !== p.interpolated
+          ? `${p.file} → ${p.targetFolder}/ (template: ${p.template} → ${p.interpolated})`
+          : `${p.file} → ${p.targetFolder}/`;
+        this.logger.info(`[PREVIEW] MOVE (with suffix): ${pathInfo}`);
       } else if (p.action === "skip") {
         this.logger.info(`[PREVIEW] SKIP: ${p.file} (${p.reason})`);
       }
@@ -803,6 +852,35 @@ class PropMoveSettingTab extends PluginSettingTab {
     containerEl.createEl("hr");
     containerEl.createEl("h3", { text: "Property Mappings" });
 
+    containerEl.createEl("p", {
+      text: "Use {propertyName} to create dynamic paths based on frontmatter values."
+    });
+
+    // Template variable help section
+    const helpSection = containerEl.createDiv();
+    helpSection.style.backgroundColor = "var(--background-secondary)";
+    helpSection.style.padding = "12px";
+    helpSection.style.borderRadius = "6px";
+    helpSection.style.marginBottom = "16px";
+    
+    helpSection.createEl("strong", { text: "📌 Template Variables Guide:" });
+    
+    const examples = [
+      "{project}/tasks → MyProject/tasks (if project=MyProject)",
+      "{project}/tasks/{priority} → MyProject/tasks/high",
+      "Archive/{status}/{date} → Archive/complete/2025-02-24",
+      "Zones/{zone}/Projects/{project} → Zones/Dev/Projects/MyApp"
+    ];
+    
+    const listContainer = helpSection.createDiv();
+    listContainer.style.marginTop = "8px";
+    examples.forEach(example => {
+      const item = listContainer.createEl("div", { text: "• " + example });
+      item.style.fontSize = "12px";
+      item.style.marginBottom = "4px";
+      item.style.color = "var(--text-muted)";
+    });
+
     if (this.plugin.settings.properties.length === 0) {
       containerEl.createEl("p", {
         text: "Add one or more properties with value-to-folder mappings."
@@ -864,7 +942,7 @@ class PropMoveSettingTab extends PluginSettingTab {
 
         setting.addText((text) =>
           text
-            .setPlaceholder("Projects/Tasks")
+            .setPlaceholder("Projects/Tasks or {project}/tasks/{priority}")
             .setValue(mapping.folder || "")
             .onChange(async (value) => {
               mapping.folder = value;
