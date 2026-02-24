@@ -21,7 +21,8 @@ const DEFAULT_SETTINGS = {
   processExistingFiles: false,
   processingDelay: 150,
   maxFilesPerBatch: 0,
-  caseInsensitiveMatching: false
+  caseInsensitiveMatching: false,
+  autoCreateFolders: true
 };
 
 /**
@@ -138,6 +139,18 @@ class FileProcessor {
       return { action: "skip", reason: "already_in_target" };
     }
 
+    // Check if folder exists
+    const folderExists = this.app.vault.getAbstractFileByPath(normalizedFolder) instanceof TFolder;
+    if (!folderExists && !this.settings.autoCreateFolders) {
+      return {
+        action: "skip",
+        reason: "folder_not_exist_no_create",
+        targetFolder: normalizedFolder,
+        template: targetFolder,
+        interpolated: interpolatedFolder
+      };
+    }
+
     const existingTarget = this.app.vault.getAbstractFileByPath(targetPath);
     if (existingTarget) {
       if (this.settings.autoAppendSuffix) {
@@ -191,7 +204,14 @@ class FileProcessor {
     }
 
     try {
-      await this.ensureFolder(normalizedFolder);
+      // Try to ensure folder exists
+      const folderCreated = await this.ensureFolder(normalizedFolder, this.settings.autoCreateFolders);
+      
+      if (!folderCreated) {
+        const msg = `Target folder does not exist and autoCreateFolders is disabled: ${normalizedFolder}`;
+        this.logger.debug(msg);
+        return { success: false, action: "skip", message: msg };
+      }
 
       const existingTarget = this.app.vault.getAbstractFileByPath(targetPath);
       if (existingTarget) {
@@ -268,21 +288,31 @@ class FileProcessor {
 
   /**
    * Ensure a folder exists, creating it if necessary
+   * @param {string} folderPath - Path to the folder
+   * @param {boolean} autoCreate - Whether to create folder if it doesn't exist
+   * @returns {Promise<boolean>} True if folder exists or was created, false otherwise
    */
-  async ensureFolder(folderPath) {
+  async ensureFolder(folderPath, autoCreate = true) {
     const existing = this.app.vault.getAbstractFileByPath(folderPath);
     if (existing instanceof TFolder) {
-      return;
+      return true;
+    }
+
+    if (!autoCreate) {
+      this.logger.debug(`Folder does not exist and autoCreateFolders is disabled: ${folderPath}`);
+      return false;
     }
 
     try {
       await this.app.vault.createFolder(folderPath);
       this.logger.debug(`Created folder: ${folderPath}`);
+      return true;
     } catch (error) {
       // Folder might already exist due to race condition
-      if (!this.app.vault.getAbstractFileByPath(folderPath)) {
-        throw error;
+      if (this.app.vault.getAbstractFileByPath(folderPath)) {
+        return true;
       }
+      throw error;
     }
   }
 
@@ -527,7 +557,11 @@ module.exports = class PropMove extends Plugin {
           : `${p.file} → ${p.targetFolder}/`;
         this.logger.info(`[PREVIEW] MOVE (with suffix): ${pathInfo}`);
       } else if (p.action === "skip") {
-        this.logger.info(`[PREVIEW] SKIP: ${p.file} (${p.reason})`);
+        if (p.reason === "folder_not_exist_no_create") {
+          this.logger.info(`[PREVIEW] SKIP: ${p.file} (folder does not exist: ${p.targetFolder})`);
+        } else {
+          this.logger.info(`[PREVIEW] SKIP: ${p.file} (${p.reason})`);
+        }
       }
     });
 
@@ -560,6 +594,16 @@ module.exports = class PropMove extends Plugin {
     try {
       this.movingPaths.add(file.path);
       const result = await this.fileProcessor.moveFile(file, targetFolder);
+      
+      // Notify user of specific failures
+      if (!result.success && result.message) {
+        if (result.message.includes("folder does not exist")) {
+          new Notice(`PropMove: ${result.message}`);
+        } else if (result.action === "error") {
+          new Notice(`PropMove: Failed to move ${file.name}`);
+        }
+      }
+      
       return result;
     } catch (error) {
       this.logger.error(`Failed to move ${file.name}: ${error.message}`);
@@ -611,7 +655,8 @@ module.exports = class PropMove extends Plugin {
       "debugLogging",
       "processingDelay",
       "maxFilesPerBatch",
-      "caseInsensitiveMatching"
+      "caseInsensitiveMatching",
+      "autoCreateFolders"
     ];
 
     newSettings.forEach(setting => {
@@ -727,6 +772,21 @@ class PropMoveSettingTab extends PluginSettingTab {
           .setValue(this.plugin.settings.autoAppendSuffix)
           .onChange(async (value) => {
             this.plugin.settings.autoAppendSuffix = value;
+            await this.plugin.saveSettings();
+          })
+      );
+
+    // Auto-create folders setting
+    new Setting(containerEl)
+      .setName("Automatically create target folders")
+      .setDesc(
+        "When enabled, missing target folders are created automatically. When disabled, files are not moved if the target folder doesn't exist and you'll be notified."
+      )
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.autoCreateFolders)
+          .onChange(async (value) => {
+            this.plugin.settings.autoCreateFolders = value;
             await this.plugin.saveSettings();
           })
       );
