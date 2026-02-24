@@ -3,6 +3,7 @@ const {
   PluginSettingTab,
   Setting,
   TFile,
+  TFolder,
   normalizePath,
   Notice,
   Command
@@ -19,8 +20,275 @@ const DEFAULT_SETTINGS = {
   debugLogging: false,
   processExistingFiles: false,
   processingDelay: 150,
-  maxFilesPerBatch: 0
+  maxFilesPerBatch: 0,
+  caseInsensitiveMatching: false
 };
+
+/**
+ * FileProcessor handles the logic of moving files based on property rules
+ */
+class FileProcessor {
+  constructor(app, settings, logger) {
+    this.app = app;
+    this.settings = settings;
+    this.logger = logger;
+  }
+
+  /**
+   * Determines the target folder for a file based on property mappings
+   * @returns {string|null} The target folder path or null if no match found
+   */
+  findTargetFolder(frontmatter) {
+    const groups = Array.isArray(this.settings.properties) ? this.settings.properties : [];
+
+    for (const group of groups) {
+      const propName = String(group.name || "").trim();
+      if (!propName) continue;
+
+      const rawValue = frontmatter[propName];
+      if (rawValue === null || rawValue === undefined) continue;
+
+      const values = Array.isArray(rawValue) ? rawValue : [rawValue];
+      const normalizedValues = values
+        .map((value) => String(value).trim())
+        .filter((value) => value.length > 0);
+
+      if (normalizedValues.length === 0) continue;
+
+      const mappings = Array.isArray(group.mappings) ? group.mappings : [];
+      const mapping = this.findMatchingMapping(mappings, normalizedValues);
+
+      if (mapping) {
+        const targetFolder = String(mapping.folder || "").trim();
+        if (targetFolder) return targetFolder;
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * Find matching mapping considering case sensitivity setting
+   */
+  findMatchingMapping(mappings, normalizedValues) {
+    for (const item of mappings) {
+      const mappingValue = String(item.value || "").trim();
+      if (mappingValue.length === 0) continue;
+
+      const isMatch = this.settings.caseInsensitiveMatching
+        ? normalizedValues.some(v => v.toLowerCase() === mappingValue.toLowerCase())
+        : normalizedValues.includes(mappingValue);
+
+      if (isMatch) return item;
+    }
+    return null;
+  }
+
+  /**
+   * Preview what would happen if a file is processed
+   * @returns {Object|null} Move preview or null if no move needed
+   */
+  previewMove(file, frontmatter) {
+    if (!frontmatter) {
+      this.logger.debug(`[PREVIEW] No frontmatter for ${file.path}`);
+      return null;
+    }
+
+    const targetFolder = this.findTargetFolder(frontmatter);
+    if (!targetFolder) {
+      this.logger.debug(`[PREVIEW] No matching rule for ${file.path}`);
+      return null;
+    }
+
+    const normalizedFolder = normalizePath(targetFolder);
+    const targetPath = normalizePath(`${normalizedFolder}/${file.name}`);
+
+    if (file.path === targetPath) {
+      this.logger.debug(`[PREVIEW] File already in correct location: ${file.path}`);
+      return { action: "skip", reason: "already_in_target" };
+    }
+
+    const existingTarget = this.app.vault.getAbstractFileByPath(targetPath);
+    if (existingTarget) {
+      if (this.settings.autoAppendSuffix) {
+        return {
+          action: "move_with_suffix",
+          currentPath: file.path,
+          targetPath: targetPath,
+          targetFolder: normalizedFolder,
+          fileName: file.name
+        };
+      } else {
+        return {
+          action: "skip",
+          reason: "target_exists",
+          targetPath: targetPath
+        };
+      }
+    }
+
+    return {
+      action: "move",
+      currentPath: file.path,
+      targetPath: targetPath,
+      targetFolder: normalizedFolder
+    };
+  }
+
+  /**
+   * Execute a file move operation with comprehensive error handling
+   */
+  async moveFile(file, targetFolder) {
+    const normalizedFolder = normalizePath(targetFolder);
+    const targetPath = normalizePath(`${normalizedFolder}/${file.name}`);
+
+    if (file.path === targetPath) {
+      this.logger.debug(`File already at target: ${file.path}`);
+      return { success: true, action: "none", message: "File already in target location" };
+    }
+
+    try {
+      await this.ensureFolder(normalizedFolder);
+
+      const existingTarget = this.app.vault.getAbstractFileByPath(targetPath);
+      if (existingTarget) {
+        if (this.settings.autoAppendSuffix) {
+          const finalPath = await this.generateUniqueFileName(normalizedFolder, file.name);
+          await this.app.vault.rename(file, finalPath);
+          this.logger.debug(`Moved ${file.path} to ${finalPath} (suffix added)`);
+          return { success: true, action: "move_with_suffix", path: finalPath };
+        } else {
+          const msg = `Target file exists at ${targetPath}`;
+          this.logger.debug(msg);
+          return { success: false, action: "skip", message: msg };
+        }
+      } else {
+        await this.app.vault.rename(file, targetPath);
+        this.logger.debug(`Moved ${file.path} to ${targetPath}`);
+        return { success: true, action: "move", path: targetPath };
+      }
+    } catch (error) {
+      this.logger.error(`Failed to move ${file.name}: ${error.message}`);
+      return { success: false, action: "error", message: error.message };
+    }
+  }
+
+  /**
+   * Check if a file is in an ignored folder
+   */
+  isFileInIgnoredFolder(filePath) {
+    const ignoreFolders = Array.isArray(this.settings.ignoreFolders)
+      ? this.settings.ignoreFolders
+      : [];
+
+    const normalizedFilePath = normalizePath(filePath);
+
+    for (const ignoreFolder of ignoreFolders) {
+      const normalizedIgnoreFolder = normalizePath(String(ignoreFolder || "").trim());
+      if (!normalizedIgnoreFolder) continue;
+
+      if (
+        normalizedFilePath.startsWith(normalizedIgnoreFolder + "/") ||
+        normalizedFilePath === normalizedIgnoreFolder
+      ) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  /**
+   * Generate a unique filename by appending numeric suffixes
+   */
+  async generateUniqueFileName(folderPath, fileName) {
+    const extension = fileName.split(".").pop();
+    const baseName = fileName.slice(0, -(extension.length + 1));
+    let counter = 1;
+    const maxAttempts = 10000;
+
+    while (counter <= maxAttempts) {
+      const newFileName = `${baseName} ${counter}.${extension}`;
+      const fullPath = normalizePath(`${folderPath}/${newFileName}`);
+      const existing = this.app.vault.getAbstractFileByPath(fullPath);
+
+      if (!existing) {
+        this.logger.debug(`Generated unique filename: ${fullPath}`);
+        return fullPath;
+      }
+
+      counter++;
+    }
+
+    throw new Error(`Could not generate unique filename after ${maxAttempts} attempts for ${fileName}`);
+  }
+
+  /**
+   * Ensure a folder exists, creating it if necessary
+   */
+  async ensureFolder(folderPath) {
+    const existing = this.app.vault.getAbstractFileByPath(folderPath);
+    if (existing instanceof TFolder) {
+      return;
+    }
+
+    try {
+      await this.app.vault.createFolder(folderPath);
+      this.logger.debug(`Created folder: ${folderPath}`);
+    } catch (error) {
+      // Folder might already exist due to race condition
+      if (!this.app.vault.getAbstractFileByPath(folderPath)) {
+        throw error;
+      }
+    }
+  }
+
+  /**
+   * Validate that a file is eligible for processing
+   */
+  isEligibleForProcessing(file) {
+    if (!(file instanceof TFile) || file.extension !== "md") {
+      return false;
+    }
+
+    if (this.app.metadataCache.isUserIgnored(file.path)) {
+      return false;
+    }
+
+    if (this.isFileInIgnoredFolder(file.path)) {
+      return false;
+    }
+
+    return true;
+  }
+}
+
+/**
+ * Logger utility for consistent logging with optional debug mode
+ */
+class Logger {
+  constructor(debugEnabled = false) {
+    this.debugEnabled = debugEnabled;
+  }
+
+  debug(msg) {
+    if (this.debugEnabled) {
+      console.log(`[PropMove] ${msg}`);
+    }
+  }
+
+  info(msg) {
+    console.log(`[PropMove] ${msg}`);
+  }
+
+  error(msg) {
+    console.error(`[PropMove] ${msg}`);
+  }
+
+  setDebugEnabled(enabled) {
+    this.debugEnabled = enabled;
+  }
+}
 
 module.exports = class PropMove extends Plugin {
   async onload() {
@@ -29,6 +297,10 @@ module.exports = class PropMove extends Plugin {
     this.pending = new Map();
     this.movingPaths = new Set();
     this.isStartup = true;
+
+    // Initialize logger and file processor
+    this.logger = new Logger(this.settings.debugLogging);
+    this.fileProcessor = new FileProcessor(this.app, this.settings, this.logger);
 
     this.addSettingTab(new PropMoveSettingTab(this.app, this));
 
@@ -39,11 +311,18 @@ module.exports = class PropMove extends Plugin {
       callback: () => this.processAllFiles()
     });
 
+    // Register preview command
+    this.addCommand({
+      id: "preview-moves",
+      name: "Preview property-based moves (shows what would be moved)",
+      callback: () => this.previewMoves()
+    });
+
     // Register event handlers conditionally based on settings
     if (this.settings.moveOnCreate && !this.settings.manualTriggerOnly) {
       this.registerEvent(
         this.app.vault.on("create", (file) => {
-          if (this.settings.debugLogging) console.log("PropMove: File created, queuing process", file.path);
+          this.logger.debug(`File created, queuing process: ${file.path}`);
           this.queueProcess(file);
         })
       );
@@ -52,14 +331,14 @@ module.exports = class PropMove extends Plugin {
     if (this.settings.moveOnMetadataChange && !this.settings.manualTriggerOnly) {
       this.registerEvent(
         this.app.metadataCache.on("changed", (file) => {
-          if (this.settings.debugLogging) console.log("PropMove: Metadata changed, queuing process", file.path);
-          
+          this.logger.debug(`Metadata changed, queuing process: ${file.path}`);
+
           // Skip processing during startup if moveOnStartup is disabled
           if (this.isStartup && !this.settings.moveOnStartup) {
-            if (this.settings.debugLogging) console.log("PropMove: Skipping startup processing for", file.path);
+            this.logger.debug(`Skipping startup processing for: ${file.path}`);
             return;
           }
-          
+
           this.queueProcess(file);
         })
       );
@@ -69,7 +348,7 @@ module.exports = class PropMove extends Plugin {
     if (this.settings.moveOnStartup && !this.settings.manualTriggerOnly) {
       setTimeout(() => {
         this.isStartup = false;
-        if (this.settings.debugLogging) console.log("PropMove: Startup complete");
+        this.logger.debug("Startup complete");
       }, 2000); // Consider startup complete after 2 seconds
     } else {
       this.isStartup = false;
@@ -84,11 +363,11 @@ module.exports = class PropMove extends Plugin {
     this.movingPaths.clear();
   }
 
+  /**
+   * Queue a file for processing with debouncing
+   */
   queueProcess(file) {
-    if (this.app.metadataCache.isUserIgnored(file.path)) {
-      return;
-    }
-    if (!(file instanceof TFile) || file.extension !== "md") {
+    if (!this.fileProcessor.isEligibleForProcessing(file)) {
       return;
     }
 
@@ -109,199 +388,145 @@ module.exports = class PropMove extends Plugin {
     this.pending.set(file.path, timeoutId);
   }
 
+  /**
+   * Process all files according to property rules
+   */
   async processAllFiles() {
-    if (this.settings.debugLogging) console.log("PropMove: Starting manual processing of all files");
-    
+    this.logger.debug("Starting manual processing of all files");
+
     const files = this.app.vault.getMarkdownFiles();
     let processedCount = 0;
+    let movedCount = 0;
+    let skippedCount = 0;
     const maxFiles = this.settings.maxFilesPerBatch > 0 ? this.settings.maxFilesPerBatch : files.length;
-    
+
     for (const file of files) {
       if (processedCount >= maxFiles) {
-        if (this.settings.debugLogging) console.log("PropMove: Reached maximum files per batch", maxFiles);
+        this.logger.debug(`Reached maximum files per batch: ${maxFiles}`);
         break;
       }
-      
+
       // Skip files in ignored folders
-      if (this.isFileInIgnoredFolder(file.path)) {
-        if (this.settings.debugLogging) console.log("PropMove: Skipping ignored file", file.path);
+      if (this.fileProcessor.isFileInIgnoredFolder(file.path)) {
+        this.logger.debug(`Skipping ignored file: ${file.path}`);
         continue;
       }
-      
+
       try {
-        if (this.settings.debugLogging) console.log("PropMove: Processing file", file.path);
-        await this.processFile(file.path);
+        this.logger.debug(`Processing file: ${file.path}`);
+        const result = await this.processFile(file.path);
+        if (result && result.success) {
+          movedCount++;
+        } else {
+          skippedCount++;
+        }
         processedCount++;
       } catch (error) {
-        console.error("PropMove: Error processing file", file.path, error);
+        this.logger.error(`Error processing file ${file.path}: ${error.message}`);
+        skippedCount++;
       }
     }
-    
-    if (this.settings.debugLogging) console.log(`PropMove: Manual processing complete. Processed ${processedCount} files`);
-    new Notice(`PropMove: Processed ${processedCount} files`);
+
+    const message = `PropMove: Processed ${processedCount} files, moved ${movedCount}, skipped ${skippedCount}`;
+    this.logger.info(message);
+    new Notice(message);
   }
 
-  async processFile(filePath) {
-    const file = this.app.vault.getAbstractFileByPath(filePath);
-    if (!(file instanceof TFile) || file.extension !== "md") {
+  /**
+   * Preview what moves would be made without actually moving files
+   */
+  async previewMoves() {
+    this.logger.debug("Starting preview of moves");
+
+    const files = this.app.vault.getMarkdownFiles();
+    const previews = [];
+    let moveCount = 0;
+    let skipCount = 0;
+
+    for (const file of files) {
+      if (!this.fileProcessor.isEligibleForProcessing(file)) {
+        continue;
+      }
+
+      const cache = this.app.metadataCache.getFileCache(file);
+      const frontmatter = cache ? cache.frontmatter : null;
+
+      const preview = this.fileProcessor.previewMove(file, frontmatter);
+      if (preview) {
+        previews.push({
+          file: file.path,
+          ...preview
+        });
+
+        if (preview.action === "move" || preview.action === "move_with_suffix") {
+          moveCount++;
+        } else {
+          skipCount++;
+        }
+      }
+    }
+
+    if (moveCount === 0 && skipCount === 0) {
+      new Notice("PropMove: No files would be moved based on current rules");
       return;
     }
 
-    // Check if file is in an ignored folder
-    if (this.isFileInIgnoredFolder(filePath)) {
-      return;
+    // Log preview results
+    previews.forEach(p => {
+      if (p.action === "move") {
+        this.logger.info(`[PREVIEW] MOVE: ${p.file} → ${p.targetPath}`);
+      } else if (p.action === "move_with_suffix") {
+        this.logger.info(`[PREVIEW] MOVE (with suffix): ${p.file} → ${p.targetFolder}/`);
+      } else if (p.action === "skip") {
+        this.logger.info(`[PREVIEW] SKIP: ${p.file} (${p.reason})`);
+      }
+    });
+
+    const message = `PropMove Preview: ${moveCount} would move, ${skipCount} would skip. Check console for details.`;
+    this.logger.info(message);
+    new Notice(message);
+  }
+
+  /**
+   * Process a single file and move it if applicable
+   */
+  async processFile(filePath) {
+    const file = this.app.vault.getAbstractFileByPath(filePath);
+    if (!this.fileProcessor.isEligibleForProcessing(file)) {
+      return null;
     }
 
     const cache = this.app.metadataCache.getFileCache(file);
     const frontmatter = cache ? cache.frontmatter : null;
+
     if (!frontmatter) {
-      return;
+      return null;
     }
 
-    const groups = Array.isArray(this.settings.properties)
-      ? this.settings.properties
-      : [];
-
-    let targetFolder = "";
-
-    for (const group of groups) {
-      const propName = String(group.name || "").trim();
-      if (!propName) {
-        continue;
-      }
-
-      const rawValue = frontmatter[propName];
-      if (rawValue === null || rawValue === undefined) {
-        continue;
-      }
-
-      const values = Array.isArray(rawValue) ? rawValue : [rawValue];
-      const normalizedValues = values
-        .map((value) => String(value).trim())
-        .filter((value) => value.length > 0);
-
-      if (normalizedValues.length === 0) {
-        continue;
-      }
-
-      const mappings = Array.isArray(group.mappings) ? group.mappings : [];
-      const mapping = mappings.find((item) => {
-        const mappingValue = String(item.value || "").trim();
-        return (
-          mappingValue.length > 0 && normalizedValues.includes(mappingValue)
-        );
-      });
-
-      if (!mapping) {
-        continue;
-      }
-
-      targetFolder = String(mapping.folder || "").trim();
-      if (targetFolder) {
-        break;
-      }
-    }
-
+    const targetFolder = this.fileProcessor.findTargetFolder(frontmatter);
     if (!targetFolder) {
-      return;
+      return null;
     }
 
-    const normalizedFolder = normalizePath(targetFolder);
-    const targetPath = normalizePath(`${normalizedFolder}/${file.name}`);
-
-    if (file.path === targetPath) {
-      return;
+    try {
+      this.movingPaths.add(file.path);
+      const result = await this.fileProcessor.moveFile(file, targetFolder);
+      return result;
+    } catch (error) {
+      this.logger.error(`Failed to move ${file.name}: ${error.message}`);
+      new Notice(`PropMove: Failed to move ${file.name}`);
+      return { success: false, error: error.message };
+    } finally {
+      this.movingPaths.delete(file.path);
     }
-
-    const existingTarget = this.app.vault.getAbstractFileByPath(targetPath);
-    if (existingTarget) {
-      if (this.settings.autoAppendSuffix) {
-        // Generate unique filename with suffix
-        const finalPath = await this.generateUniqueFileName(
-          normalizedFolder,
-          file.name
-        );
-        
-        try {
-          this.movingPaths.add(file.path);
-          await this.ensureFolder(normalizedFolder);
-          await this.app.vault.rename(file, finalPath);
-        } catch (error) {
-          new Notice(`PropMove: failed to move ${file.name}`);
-          console.error("PropMove move failed", error);
-        } finally {
-          this.movingPaths.delete(file.path);
-        }
-      } else {
-        new Notice(`PropMove: target exists at ${targetPath}`);
-        return;
-      }
-    } else {
-      try {
-        this.movingPaths.add(file.path);
-        await this.ensureFolder(normalizedFolder);
-        await this.app.vault.rename(file, targetPath);
-      } catch (error) {
-        new Notice(`PropMove: failed to move ${file.name}`);
-        console.error("PropMove move failed", error);
-      } finally {
-        this.movingPaths.delete(file.path);
-      }
-    }
-  }
-
-  isFileInIgnoredFolder(filePath) {
-    const ignoreFolders = Array.isArray(this.settings.ignoreFolders)
-      ? this.settings.ignoreFolders
-      : [];
-
-    for (const ignoreFolder of ignoreFolders) {
-      const normalizedIgnoreFolder = normalizePath(String(ignoreFolder || "").trim());
-      if (!normalizedIgnoreFolder) {
-        continue;
-      }
-
-      const normalizedFilePath = normalizePath(filePath);
-      
-      // Check if the file path starts with the ignore folder
-      if (normalizedFilePath.startsWith(normalizedIgnoreFolder + "/") ||
-          normalizedFilePath === normalizedIgnoreFolder) {
-        return true;
-      }
-    }
-
-    return false;
-  }
-
-  async generateUniqueFileName(folderPath, fileName) {
-    const extension = fileName.split(".").pop();
-    const baseName = fileName.slice(0, -(extension.length + 1));
-    let counter = 1;
-    
-    while (true) {
-      const newFileName = `${baseName} ${counter}.${extension}`;
-      const fullPath = normalizePath(`${folderPath}/${newFileName}`);
-      const existing = this.app.vault.getAbstractFileByPath(fullPath);
-      
-      if (!existing) {
-        return fullPath;
-      }
-      
-      counter++;
-    }
-  }
-
-  async ensureFolder(folderPath) {
-    const existing = this.app.vault.getAbstractFileByPath(folderPath);
-    if (existing) {
-      return;
-    }
-
-    await this.app.vault.createFolder(folderPath);
   }
 
   async saveSettings() {
     await this.saveData(this.settings);
+    // Update logger debug setting
+    if (this.logger) {
+      this.logger.setDebugEnabled(this.settings.debugLogging);
+    }
   }
 
   migrateSettings() {
@@ -329,27 +554,22 @@ module.exports = class PropMove extends Plugin {
     }
 
     // Migrate new settings with defaults if they don't exist
-    if (this.settings.moveOnCreate === undefined) {
-      this.settings.moveOnCreate = DEFAULT_SETTINGS.moveOnCreate;
-    }
-    if (this.settings.moveOnMetadataChange === undefined) {
-      this.settings.moveOnMetadataChange = DEFAULT_SETTINGS.moveOnMetadataChange;
-    }
-    if (this.settings.moveOnStartup === undefined) {
-      this.settings.moveOnStartup = DEFAULT_SETTINGS.moveOnStartup;
-    }
-    if (this.settings.manualTriggerOnly === undefined) {
-      this.settings.manualTriggerOnly = DEFAULT_SETTINGS.manualTriggerOnly;
-    }
-    if (this.settings.debugLogging === undefined) {
-      this.settings.debugLogging = DEFAULT_SETTINGS.debugLogging;
-    }
-    if (this.settings.processingDelay === undefined) {
-      this.settings.processingDelay = DEFAULT_SETTINGS.processingDelay;
-    }
-    if (this.settings.maxFilesPerBatch === undefined) {
-      this.settings.maxFilesPerBatch = DEFAULT_SETTINGS.maxFilesPerBatch;
-    }
+    const newSettings = [
+      "moveOnCreate",
+      "moveOnMetadataChange",
+      "moveOnStartup",
+      "manualTriggerOnly",
+      "debugLogging",
+      "processingDelay",
+      "maxFilesPerBatch",
+      "caseInsensitiveMatching"
+    ];
+
+    newSettings.forEach(setting => {
+      if (this.settings[setting] === undefined) {
+        this.settings[setting] = DEFAULT_SETTINGS[setting];
+      }
+    });
   }
 };
 
@@ -363,7 +583,7 @@ class PropMoveSettingTab extends PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
 
-    containerEl.createEl("h2", { text: "PropMove" });
+    containerEl.createEl("h2", { text: "PropMove Settings" });
 
     // Manual trigger only setting (master switch)
     new Setting(containerEl)
@@ -375,7 +595,7 @@ class PropMoveSettingTab extends PluginSettingTab {
           .onChange(async (value) => {
             this.plugin.settings.manualTriggerOnly = value;
             await this.plugin.saveSettings();
-            this.display(); // Refresh UI to reflect dependent settings state
+            this.display();
           })
       );
 
@@ -396,7 +616,7 @@ class PropMoveSettingTab extends PluginSettingTab {
         disabled: this.plugin.settings.manualTriggerOnly
       },
       {
-        name: "Move on property change", 
+        name: "Move on property change",
         desc: "Move files when their frontmatter properties are modified",
         setting: "moveOnMetadataChange",
         disabled: this.plugin.settings.manualTriggerOnly
@@ -435,6 +655,16 @@ class PropMoveSettingTab extends PluginSettingTab {
           })
       );
 
+    // Preview button
+    new Setting(containerEl)
+      .addButton((button) =>
+        button
+          .setButtonText("Preview moves (read-only)")
+          .onClick(async () => {
+            await this.plugin.previewMoves();
+          })
+      );
+
     containerEl.createEl("hr");
 
     // Auto-append suffix setting
@@ -452,8 +682,23 @@ class PropMoveSettingTab extends PluginSettingTab {
           })
       );
 
+    // Case-insensitive matching
+    new Setting(containerEl)
+      .setName("Case-insensitive property matching")
+      .setDesc(
+        "When enabled, property values are matched case-insensitively (e.g., 'Task', 'task', 'TASK' all match)"
+      )
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.caseInsensitiveMatching)
+          .onChange(async (value) => {
+            this.plugin.settings.caseInsensitiveMatching = value;
+            await this.plugin.saveSettings();
+          })
+      );
+
     containerEl.createEl("hr");
-    
+
     // Performance settings
     containerEl.createEl("h3", { text: "Performance Settings" });
 
@@ -500,7 +745,7 @@ class PropMoveSettingTab extends PluginSettingTab {
 
     containerEl.createEl("hr");
     containerEl.createEl("h3", { text: "Ignore Folders" });
-    
+
     containerEl.createEl("p", {
       text: "Add folders to exclude files from being moved. Files in these folders will be ignored even if they match a property mapping (e.g., template folders)."
     });
@@ -556,7 +801,7 @@ class PropMoveSettingTab extends PluginSettingTab {
     });
 
     containerEl.createEl("hr");
-    containerEl.createEl("h3", { text: "Properties" });
+    containerEl.createEl("h3", { text: "Property Mappings" });
 
     if (this.plugin.settings.properties.length === 0) {
       containerEl.createEl("p", {
@@ -573,7 +818,7 @@ class PropMoveSettingTab extends PluginSettingTab {
 
       const groupSetting = new Setting(containerEl)
         .setName("Property name")
-        .setDesc("Frontmatter property to watch.");
+        .setDesc("Frontmatter property to watch (e.g., 'type', 'status', 'category')");
 
       groupSetting.addText((text) =>
         text
@@ -599,7 +844,8 @@ class PropMoveSettingTab extends PluginSettingTab {
       const mappings = Array.isArray(group.mappings) ? group.mappings : [];
       if (mappings.length === 0) {
         containerEl.createEl("p", {
-          text: "Add one or more mappings for this property."
+          text: "Add one or more value-to-folder mappings for this property.",
+          cls: "setting-item-description"
         });
       }
 
