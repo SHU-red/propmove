@@ -70,11 +70,21 @@ class FileProcessor {
 
   /**
    * Find matching mapping considering case sensitivity setting
+   * Supports wildcard '*' to match any non-empty property value
    */
   findMatchingMapping(mappings, normalizedValues) {
     for (const item of mappings) {
       const mappingValue = String(item.value || "").trim();
       if (mappingValue.length === 0) continue;
+
+      // Wildcard match - '*' matches any non-empty value
+      if (mappingValue === "*") {
+        if (normalizedValues.length > 0) {
+          this.logger.debug(`[MATCH] Wildcard matched with value: ${normalizedValues[0]}`);
+          return item;
+        }
+        continue;
+      }
 
       const isMatch = this.settings.caseInsensitiveMatching
         ? normalizedValues.some(v => v.toLowerCase() === mappingValue.toLowerCase())
@@ -923,13 +933,14 @@ class PropMoveSettingTab extends PluginSettingTab {
     helpSection.style.borderRadius = "6px";
     helpSection.style.marginBottom = "16px";
     
-    helpSection.createEl("strong", { text: "📌 Template Variables Guide:" });
+    helpSection.createEl("strong", { text: "📌 Template Variables & Wildcards Guide:" });
     
     const examples = [
       "{project}/tasks → MyProject/tasks (if project=MyProject)",
       "{project}/tasks/{priority} → MyProject/tasks/high",
       "Archive/{status}/{date} → Archive/complete/2025-02-24",
-      "Zones/{zone}/Projects/{project} → Zones/Dev/Projects/MyApp"
+      "Zones/{zone}/Projects/{project} → Zones/Dev/Projects/MyApp",
+      "* as property value → matches ANY non-empty property value"
     ];
     
     const listContainer = helpSection.createDiv();
@@ -987,12 +998,20 @@ class PropMoveSettingTab extends PluginSettingTab {
         });
       }
 
+      // Show wildcard hint for this property
+      if (mappings.length > 0) {
+        containerEl.createEl("p", {
+          text: "💡 Tip: Use * as the property value to match ANY non-empty value (e.g., move all notes with this property to a folder using {property} variables)",
+          cls: "setting-item-description"
+        });
+      }
+
       mappings.forEach((mapping, index) => {
         const setting = new Setting(containerEl).setName(`Mapping ${index + 1}`);
 
         setting.addText((text) =>
           text
-            .setPlaceholder("task")
+            .setPlaceholder("task or * to match any value")
             .setValue(mapping.value || "")
             .onChange(async (value) => {
               mapping.value = value;
