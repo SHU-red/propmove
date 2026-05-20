@@ -32,13 +32,20 @@ if [ ! -f manifest.json ]; then
 fi
 
 CURRENT_VERSION=$(jq -r '.version' manifest.json)
+
+# Double check we didn't get an empty string or the broken raw dots
+if [[ -z "$CURRENT_VERSION" || "$CURRENT_VERSION" == "..1" ]]; then
+  echo "❌ Error: manifest.json version is empty or invalid ('$CURRENT_VERSION')."
+  echo "👉 Please manually open manifest.json and set \"version\": \"1.0.0\" (or your true current version) first."
+  exit 1
+fi
+
 echo "🔍 Current version is: $CURRENT_VERSION"
 
-# 5. Split version into array [major, minor, patch]
-IFS='.' read -r -a VERSION_PARTS <<< "$CURRENT_VERSION"
-MAJOR=${VERSION_PARTS[0]}
-MINOR=${VERSION_PARTS[1]}
-PATCH=${VERSION_PARTS[2]}
+# 5. Extract version components cleanly using parameter expansion
+MAJOR=$(echo "$CURRENT_VERSION" | cut -d. -f1)
+MINOR=$(echo "$CURRENT_VERSION" | cut -d. -f2)
+PATCH=$(echo "$CURRENT_VERSION" | cut -d. -f3)
 
 # 6. Calculate new version based on input
 if [ "$RELEASE_TYPE" == "major" ]; then
@@ -53,7 +60,7 @@ elif [ "$RELEASE_TYPE" == "patch" ]; then
 fi
 
 NEW_VERSION="$MAJOR.$MINOR.$PATCH"
-echo "🔄 Calculating new version: $NEW_VERSION"
+echo "🔄 Calculated new version: $NEW_VERSION"
 
 # 7. Update manifest.json safely using jq
 echo "📝 Updating manifest.json to $NEW_VERSION..."
