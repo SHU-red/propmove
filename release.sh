@@ -1,3 +1,4 @@
+cat << 'EOF' > release.sh
 #!/usr/bin/env bash
 
 # Exit immediately if any command fails
@@ -33,10 +34,10 @@ fi
 
 CURRENT_VERSION=$(jq -r '.version' manifest.json)
 
-# Double check we didn't get an empty string or the broken raw dots
+# Double check we didn't get an empty string or broken raw dots
 if [[ -z "$CURRENT_VERSION" || "$CURRENT_VERSION" == "..1" ]]; then
   echo "❌ Error: manifest.json version is empty or invalid ('$CURRENT_VERSION')."
-  echo "👉 Please manually open manifest.json and set \"version\": \"1.0.0\" (or your true current version) first."
+  echo "👉 Please manually open manifest.json and set \"version\": \"1.0.0\" first."
   exit 1
 fi
 
@@ -75,5 +76,11 @@ git commit -m "chore: bump version to $NEW_VERSION"
 echo "🏷️ Creating Git tag $NEW_VERSION..."
 git tag -a "$NEW_VERSION" -m "$NEW_VERSION"
 
-echo "✅ Success! Run the following to trigger your GitHub Action:"
-echo "👉 git push origin main --tags"
+# 10. Automatically push to the remote repository along with tags
+CURRENT_BRANCH=$(git branch --show-current)
+echo "🚀 Pushing branch '$CURRENT_BRANCH' and tag '$NEW_VERSION' to origin..."
+git push origin "$CURRENT_BRANCH" --tags
+
+echo "🎉 Done! The tag has been pushed and your GitHub Action is now building the release."
+EOF
+chmod +x release.sh
