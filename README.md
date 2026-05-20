@@ -21,6 +21,7 @@ Variable. Use wildcards to let the extension create folders based on whatever va
 - **Smart conflict handling:** Appends unique suffixes (note 1.md, note 2.md) when targets exist
 - **Ignore folders:** Protect template folders by excluding them from processing
 - **Auto folder creation:** Creates missing target directories automatically
+- **Wiki-link stripping:** `[[Project]]` in property values resolves to clean folder names (`Project`)
 
 ## Installation
 
