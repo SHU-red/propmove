@@ -4,7 +4,15 @@ Automatically move notes based on frontmatter properties. **It just works.**
 
 <a href="https://www.buymeacoffee.com/yffbptmtaa" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-violet.png" alt="Buy Me A Coffee" style="height: 60px !important;width: 217px !important;" ></a>
 
+## Flexible mapping based on property values
+
+Simple. Manually map specific values:
+
 ![PropMove Settings](assets/screenshot.png)
+
+Variable. Use wildcards to let the extension create folders based on whatever value your property has: 
+
+![PropMove Settings](assets/screenshot_2.png)
 
 ## Features
 
