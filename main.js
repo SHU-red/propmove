@@ -112,12 +112,13 @@ class FileProcessor {
         return match; // Keep the placeholder if property not found
       }
 
-      const normalized = String(value).trim();
+      let normalized = String(value).trim();
       if (normalized.length === 0) {
         this.logger.debug(`[INTERPOLATE] Property '${propName}' is empty, keeping literal: ${match}`);
         return match;
       }
 
+      normalized = stripWikiLink(normalized);
       this.logger.debug(`[INTERPOLATE] Replaced {${propName}} with '${normalized}'`);
       return normalized;
     });
@@ -372,6 +373,8 @@ class Logger {
     this.debugEnabled = enabled;
   }
 }
+
+const stripWikiLink = require('./lib/strip-wiki-link');
 
 module.exports = class PropMove extends Plugin {
   async onload() {
@@ -676,6 +679,9 @@ module.exports = class PropMove extends Plugin {
     });
   }
 };
+
+// Export for testing
+module.exports.stripWikiLink = stripWikiLink;
 
 class PropMoveSettingTab extends PluginSettingTab {
   constructor(app, plugin) {
