@@ -19,11 +19,7 @@ jobs:
         run: |
           tag="${GITHUB_REF#refs/tags/}"
           
-          # Start building our array of files to attach
-          # main.js and manifest.json are always required
           files=("main.js" "manifest.json")
-          
-          # Only include styles.css if it exists and is greater than 0 bytes
           if [ -s "styles.css" ]; then
             files+=("styles.css")
           fi
@@ -31,4 +27,5 @@ jobs:
           gh release create "$tag" \
             --title="$tag" \
             --draft \
+            --generate-notes \
             "${files[@]}"
