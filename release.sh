@@ -24,3 +24,6 @@ git tag -a "$NEW_VERSION" -m "$NEW_VERSION"
 
 # 3. Push everything to GitHub
 git push origin main --tags
+
+# 4. Create GitHub release with attached assets
+gh release create "$NEW_VERSION" main.js manifest.json --generate-notes
