@@ -23,7 +23,5 @@ git commit -m "chore: bump version to $NEW_VERSION"
 git tag -a "$NEW_VERSION" -m "$NEW_VERSION"
 
 # 3. Push everything to GitHub
+# GitHub Actions (release.yml) creates the release with attached assets on tag push
 git push origin main --tags
-
-# 4. Create GitHub release with attached assets
-gh release create "$NEW_VERSION" main.js manifest.json --generate-notes
