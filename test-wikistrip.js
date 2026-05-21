@@ -1,12 +1,30 @@
-// Test: stripWikiLink
-// Tests the actual function used by main.js (lib/strip-wiki-link.js)
+// Test: stripWikiLink from main.js
 // Run: node test-wikistrip.js
 
-const stripWikiLink = require('./lib/strip-wiki-link');
+// Mock obsidian module BEFORE requiring main.js
+const Module = require('module');
+const originalResolveFilename = Module._resolveFilename;
+Module._resolveFilename = function (request, parent) {
+  if (request === 'obsidian') return '/mock/obsidian.js';
+  return originalResolveFilename.apply(this, arguments);
+};
+
+const mockObsidian = {
+  Plugin: class Plugin {},
+  PluginSettingTab: class PluginSettingTab {},
+  Setting: class Setting {},
+  TFile: class TFile {},
+  TFolder: class TFolder {},
+  normalizePath: (p) => p,
+  Notice: class Notice {},
+  Command: class Command {},
+};
+require.cache['/mock/obsidian.js'] = { exports: mockObsidian };
+
+const { stripWikiLink } = require('./main.js');
 
 // --- stripWikiLink unit tests ---
 const unitTests = [
-  // [input, expected, description]
   ['[[MyProject]]', 'MyProject', 'basic wiki-link'],
   ['[[My Project|MP]]', 'My Project', 'wiki-link with alias'],
   ['PlainName', 'PlainName', 'plain text untouched'],
@@ -35,9 +53,6 @@ for (const [input, expected, desc] of unitTests) {
 }
 
 // --- Integration: full interpolateVariables pipeline ---
-// Replicates the exact interpolation logic from main.js
-// Uses the SAME stripWikiLink import — verifies the function
-// behaves correctly when called from the interpolation path.
 function interpolateVariables(path, frontmatter) {
   return path.replace(/{(\w+)}/g, (match, propName) => {
     const value = frontmatter[propName];
@@ -50,7 +65,6 @@ function interpolateVariables(path, frontmatter) {
 }
 
 const integrationTests = [
-  // [path, frontmatter, expected, description]
   ['Projects/{project}/tasks', { project: '[[MyProject]]' }, 'Projects/MyProject/tasks', 'interpolate wiki-link in path'],
   ['{a}/{b}', { a: '[[Alpha]]', b: '[[Beta]]' }, 'Alpha/Beta', 'multiple wiki-link vars'],
   ['Projects/{project}', { project: 'PlainName' }, 'Projects/PlainName', 'interpolate plain text'],

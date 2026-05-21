@@ -374,7 +374,15 @@ class Logger {
   }
 }
 
-const stripWikiLink = require('./lib/strip-wiki-link');
+/**
+ * Strip [[wiki-link]] wrapper from a string value.
+ * Handles: [[Name]], [[Name|Alias]], [[Name#heading]]
+ * Leaves plain text and partial links unchanged.
+ */
+function stripWikiLink(value) {
+  const match = value.match(/^\[\[([^\]\|]+)(?:\|.*)?\]\]$/);
+  return match ? match[1] : value;
+}
 
 module.exports = class PropMove extends Plugin {
   async onload() {
