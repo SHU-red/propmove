@@ -2,6 +2,10 @@
 
 Automatically move notes based on frontmatter properties. **It just works.**
 
+> 💡 **Built with AI** — This plugin is developed and maintained via AI agents.
+> I use AI as my primary tool for implementation, issue handling, and maintenance.
+> You are free to choose whether to use this plugin based on that.
+
 <a href="https://www.buymeacoffee.com/yffbptmtaa" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-violet.png" alt="Buy Me A Coffee" style="height: 60px !important;width: 217px !important;" ></a>
 
 ## Flexible mapping based on property values
