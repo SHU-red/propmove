@@ -1247,9 +1247,6 @@ class PropMoveSettingTab extends PluginSettingTab {
       };
     });
 
-    // Divider before "Add property"
-    containerEl.createEl("hr");
-
     new Setting(containerEl).addButton((button) => {
       button
         .setButtonText("Add property")
