@@ -85,6 +85,307 @@ for (const [path, fm, expected, desc] of integrationTests) {
   }
 }
 
-const total = unitTests.length + integrationTests.length;
+// --- handleFolderRename unit tests ---
+// Simulates the rename handler logic without Obsidian
+function normalizePathMock(p) {
+  return p.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
+}
+
+function simulateHandleFolderRename(settings, newPath, oldPath) {
+  const oldNormalized = normalizePathMock(oldPath);
+  const newNormalized = normalizePathMock(newPath);
+  let updated = 0;
+
+  settings.properties.forEach(group => {
+    // Respect per-property autoUpdatePaths flag
+    if (group.autoUpdatePaths === false) {
+      return;
+    }
+
+    (group.mappings || []).forEach(mapping => {
+      const oldFolder = normalizePathMock(mapping.folder);
+      if (
+        oldFolder === oldNormalized ||
+        oldFolder.startsWith(oldNormalized + "/")
+      ) {
+        mapping.folder = newNormalized + oldFolder.slice(oldNormalized.length);
+        updated++;
+      }
+    });
+  });
+
+  // Also check ignoreFolders
+  for (let i = 0; i < settings.ignoreFolders.length; i++) {
+    const oldIgnore = normalizePathMock(settings.ignoreFolders[i]);
+    if (
+      oldIgnore === oldNormalized ||
+      oldIgnore.startsWith(oldNormalized + "/")
+    ) {
+      settings.ignoreFolders[i] =
+        newNormalized + oldIgnore.slice(oldNormalized.length);
+      updated++;
+    }
+  }
+
+  return updated;
+}
+
+// Deep clone helper for test isolation
+function deepClone(obj) {
+  return JSON.parse(JSON.stringify(obj));
+}
+
+const baseSettings = {
+  properties: [
+    {
+      name: "status",
+      autoUpdatePaths: true,
+      mappings: [
+        { value: "inbox", folder: "Notes/Inbox" },
+        { value: "done", folder: "Notes/Archive" },
+        { value: "active", folder: "Projects/Active" }
+      ]
+    },
+    {
+      name: "type",
+      autoUpdatePaths: true,
+      mappings: [
+        { value: "task", folder: "Tasks/Inbox" },
+        { value: "*", folder: "Notes/{type}" }
+      ]
+    }
+  ],
+  ignoreFolders: ["Notes/Templates", "Scratch"]
+};
+
+const renameTests = [
+  {
+    desc: "Exact match - folder renamed directly",
+    settings: baseSettings,
+    oldPath: "Notes/Inbox",
+    newPath: "Journal/Inbox",
+    expect: {
+      mappings: [
+        { folder: "Journal/Inbox" },   // changed
+        { folder: "Notes/Archive" },   // unchanged
+        { folder: "Projects/Active" }, // unchanged
+        { folder: "Tasks/Inbox" },     // unchanged
+        { folder: "Notes/{type}" }    // unchanged
+      ],
+      ignores: ["Notes/Templates", "Scratch"],
+      updated: 1
+    }
+  },
+  {
+    desc: "Parent folder renamed - all children update",
+    settings: baseSettings,
+    oldPath: "Notes",
+    newPath: "Journal",
+    expect: {
+      mappings: [
+        { folder: "Journal/Inbox" },   // changed (child)
+        { folder: "Journal/Archive" }, // changed (child)
+        { folder: "Projects/Active" }, // unchanged
+        { folder: "Tasks/Inbox" },     // unchanged
+        { folder: "Journal/{type}" }  // changed (child)
+      ],
+      ignores: ["Journal/Templates", "Scratch"],
+      updated: 4 // 3 mappings + 1 ignore
+    }
+  },
+  {
+    desc: "Unrelated rename - no changes",
+    settings: baseSettings,
+    oldPath: "Random/Folder",
+    newPath: "Other/Folder",
+    expect: {
+      mappings: [
+        { folder: "Notes/Inbox" },
+        { folder: "Notes/Archive" },
+        { folder: "Projects/Active" },
+        { folder: "Tasks/Inbox" },
+        { folder: "Notes/{type}" }
+      ],
+      ignores: ["Notes/Templates", "Scratch"],
+      updated: 0
+    }
+  },
+  {
+    desc: "Prefix match prevented - partial name overlap",
+    settings: {
+      properties: [
+        {
+          name: "cat",
+          mappings: [{ value: "x", folder: "Notes/Inbox" }]
+        }
+      ],
+      ignoreFolders: []
+    },
+    oldPath: "Note",        // partial match of "Notes"
+    newPath: "Journal",
+    expect: {
+      mappings: [{ folder: "Notes/Inbox" }],
+      ignores: [],
+      updated: 0
+    }
+  },
+  {
+    desc: "Root folder rename",
+    settings: {
+      properties: [
+        {
+          name: "tag",
+          mappings: [
+            { value: "a", folder: "Inbox" },
+            { value: "b", folder: "Inbox/Sub" }
+          ]
+        }
+      ],
+      ignoreFolders: []
+    },
+    oldPath: "Inbox",
+    newPath: "Tray",
+    expect: {
+      mappings: [
+        { folder: "Tray" },
+        { folder: "Tray/Sub" }
+      ],
+      ignores: [],
+      updated: 2
+    }
+  },
+  {
+    desc: "Deeply nested parent rename",
+    settings: {
+      properties: [
+        {
+          name: "z",
+          mappings: [
+            { value: "a", folder: "A/B/C/D" },
+            { value: "b", folder: "A/B/C/D/E" },
+            { value: "c", folder: "A/B/X" }
+          ]
+        }
+      ],
+      ignoreFolders: []
+    },
+    oldPath: "A/B",
+    newPath: "A/Z",
+    expect: {
+      mappings: [
+        { folder: "A/Z/C/D" },
+        { folder: "A/Z/C/D/E" },
+        { folder: "A/Z/X" }
+      ],
+      ignores: [],
+      updated: 3
+    }
+  },
+  {
+    desc: "ignoreFolders updated on rename",
+    settings: {
+      properties: [],
+      ignoreFolders: ["Notes/Templates", "Scratch"]
+    },
+    oldPath: "Notes",
+    newPath: "Journal",
+    expect: {
+      mappings: [],
+      ignores: ["Journal/Templates", "Scratch"],
+      updated: 1
+    }
+  },
+  {
+    desc: "autoUpdatePaths=false skips property",
+    settings: {
+      properties: [
+        {
+          name: "status",
+          autoUpdatePaths: true,
+          mappings: [{ value: "x", folder: "Notes/Inbox" }]
+        },
+        {
+          name: "type",
+          autoUpdatePaths: false,
+          mappings: [{ value: "y", folder: "Notes/Types" }]
+        }
+      ],
+      ignoreFolders: []
+    },
+    oldPath: "Notes",
+    newPath: "Journal",
+    expect: {
+      mappings: [
+        { folder: "Journal/Inbox" },  // updated (autoUpdatePaths=true)
+        { folder: "Notes/Types" }     // unchanged (autoUpdatePaths=false)
+      ],
+      ignores: [],
+      updated: 1
+    }
+  },
+  {
+    desc: "all properties disabled - no updates",
+    settings: {
+      properties: [
+        {
+          name: "a",
+          autoUpdatePaths: false,
+          mappings: [{ value: "x", folder: "Notes/A" }]
+        }
+      ],
+      ignoreFolders: ["Notes/B"]
+    },
+    oldPath: "Notes",
+    newPath: "Journal",
+    expect: {
+      mappings: [{ folder: "Notes/A" }],
+      ignores: ["Journal/B"],  // ignores still update (no per-item flag)
+      updated: 1
+    }
+  }
+];
+
+for (const test of renameTests) {
+  const settings = deepClone(test.settings);
+  const updated = simulateHandleFolderRename(settings, test.newPath, test.oldPath);
+  const ok = updated === test.expect.updated;
+
+  // Deep check actual values
+  let valuesOk = true;
+  let detail = '';
+
+  if (ok) {
+    // Check mapping values
+    let i = 0;
+    for (const group of settings.properties) {
+      for (const m of (group.mappings || [])) {
+        if (test.expect.mappings[i]) {
+          if (m.folder !== test.expect.mappings[i].folder) {
+            valuesOk = false;
+            detail = `mapping[${i}]: expected ${test.expect.mappings[i].folder}, got ${m.folder}`;
+          }
+        }
+        i++;
+      }
+    }
+    // Check ignore values
+    for (let j = 0; j < test.expect.ignores.length; j++) {
+      if (settings.ignoreFolders[j] !== test.expect.ignores[j]) {
+        valuesOk = false;
+        detail = `ignore[${j}]: expected ${test.expect.ignores[j]}, got ${settings.ignoreFolders[j]}`;
+      }
+    }
+  }
+
+  const totalOk = ok && valuesOk;
+  if (totalOk) pass++; else fail++;
+  console.log(totalOk ? 'PASS' : 'FAIL', test.desc);
+  if (!totalOk) {
+    console.log(`  updated: expected ${test.expect.updated}, got ${updated}`);
+    console.log(`  valuesOk: ${valuesOk} ${detail}`);
+  }
+}
+
+const total = unitTests.length + integrationTests.length + renameTests.length;
 console.log(`\n${pass}/${total} passed`);
 process.exit(fail > 0 ? 1 : 0);

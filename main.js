@@ -438,6 +438,15 @@ module.exports = class PropMove extends Plugin {
       );
     }
 
+    // Track folder renames and auto-update mapping paths
+    this.registerEvent(
+      this.app.vault.on("rename", (file, oldPath) => {
+        if (file instanceof TFolder) {
+          this.handleFolderRename(file.path, oldPath);
+        }
+      })
+    );
+
     // Handle startup processing if enabled
     if (this.settings.moveOnStartup && !this.settings.manualTriggerOnly) {
       setTimeout(() => {
@@ -446,6 +455,64 @@ module.exports = class PropMove extends Plugin {
       }, 2000); // Consider startup complete after 2 seconds
     } else {
       this.isStartup = false;
+    }
+  }
+
+  /**
+   * Handle folder rename by updating all mapping paths that reference the old path.
+   * Covers exact folder match and nested subfolder references.
+   */
+  handleFolderRename(newPath, oldPath) {
+    const oldNormalized = normalizePath(oldPath);
+    const newNormalized = normalizePath(newPath);
+
+    let updated = 0;
+
+    this.settings.properties.forEach(group => {
+      // Skip properties with auto-update disabled
+      if (group.autoUpdatePaths === false) {
+        return;
+      }
+
+      (group.mappings || []).forEach(mapping => {
+        const oldFolder = normalizePath(mapping.folder);
+
+        // Exact match or parent folder
+        if (
+          oldFolder === oldNormalized ||
+          oldFolder.startsWith(oldNormalized + "/")
+        ) {
+          // Replace the old folder path with the new one
+          mapping.folder = newNormalized + oldFolder.slice(oldNormalized.length);
+          updated++;
+          this.logger.debug(
+            `[RENAME] Updated mapping path: "${oldFolder}" -> "${mapping.folder}"`
+          );
+        }
+      });
+    });
+
+    // Also check ignoreFolders
+    for (let i = 0; i < this.settings.ignoreFolders.length; i++) {
+      const oldIgnore = normalizePath(this.settings.ignoreFolders[i]);
+      if (
+        oldIgnore === oldNormalized ||
+        oldIgnore.startsWith(oldNormalized + "/")
+      ) {
+        this.settings.ignoreFolders[i] =
+          newNormalized + oldIgnore.slice(oldNormalized.length);
+        updated++;
+        this.logger.debug(
+          `[RENAME] Updated ignore folder: "${oldIgnore}" -> "${this.settings.ignoreFolders[i]}"`
+        );
+      }
+    }
+
+    if (updated > 0) {
+      this.saveSettings();
+      this.logger.info(
+        `[RENAME] Updated ${updated} path(s) after "${oldNormalized}" -> "${newNormalized}"`
+      );
     }
   }
 
@@ -659,7 +726,8 @@ module.exports = class PropMove extends Plugin {
 
     this.settings.properties = properties.map((group) => ({
       name: String(group.name || "").trim(),
-      mappings: Array.isArray(group.mappings) ? group.mappings : []
+      mappings: Array.isArray(group.mappings) ? group.mappings : [],
+      autoUpdatePaths: group.autoUpdatePaths !== false // default true
     }));
 
     // Ensure ignoreFolders is properly initialized
@@ -968,106 +1036,219 @@ class PropMoveSettingTab extends PluginSettingTab {
 
     if (this.plugin.settings.properties.length === 0) {
       containerEl.createEl("p", {
-        text: "Add one or more properties with value-to-folder mappings."
+        text: "Add one or more properties with value-to-folder mappings.",
+        cls: "setting-item-description"
       });
     }
 
     this.plugin.settings.properties.forEach((group, groupIndex) => {
-      if (groupIndex > 0) {
-        containerEl.createEl("hr");
-      }
+      // Card container
+      const card = containerEl.createDiv();
+      card.style.background = "var(--background-secondary)";
+      card.style.borderRadius = "8px";
+      card.style.padding = "16px";
+      card.style.marginBottom = "12px";
 
-      containerEl.createEl("h4", { text: `Property ${groupIndex + 1}` });
+      // Card header: title + trash
+      const header = card.createDiv();
+      header.style.display = "flex";
+      header.style.justifyContent = "space-between";
+      header.style.alignItems = "center";
+      header.style.marginBottom = "12px";
+      header.style.borderBottom = "1px solid var(--background-modifier-border)";
+      header.style.paddingBottom = "8px";
 
-      const groupSetting = new Setting(containerEl)
-        .setName("Property name")
-        .setDesc("Frontmatter property to watch (e.g., 'type', 'status', 'category')");
-
-      groupSetting.addText((text) =>
-        text
-          .setPlaceholder("type")
-          .setValue(group.name || "")
-          .onChange(async (value) => {
-            group.name = value;
-            await this.plugin.saveSettings();
-          })
-      );
-
-      groupSetting.addExtraButton((button) => {
-        button
-          .setIcon("trash")
-          .setTooltip("Remove property")
-          .onClick(async () => {
-            this.plugin.settings.properties.splice(groupIndex, 1);
-            await this.plugin.saveSettings();
-            this.display();
-          });
+      const title = header.createEl("strong", {
+        text: `Property ${groupIndex + 1}`
       });
+      title.style.fontSize = "14px";
+
+      const trashBtn = header.createEl("button");
+      trashBtn.innerHTML = "<svg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><polyline points='3 6 5 6 21 6'></polyline><path d='M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2'></path></svg>";
+      trashBtn.style.background = "none";
+      trashBtn.style.border = "none";
+      trashBtn.style.cursor = "pointer";
+      trashBtn.style.color = "var(--text-muted)";
+      trashBtn.style.padding = "4px";
+      trashBtn.style.display = "flex";
+      trashBtn.style.alignItems = "center";
+      trashBtn.title = "Remove property";
+      trashBtn.onclick = async () => {
+        this.plugin.settings.properties.splice(groupIndex, 1);
+        await this.plugin.saveSettings();
+        this.display();
+      };
+
+      // Property name input
+      const nameRow = card.createDiv();
+      nameRow.style.display = "flex";
+      nameRow.style.alignItems = "center";
+      nameRow.style.gap = "8px";
+      nameRow.style.marginBottom = "12px";
+
+      const nameLabel = nameRow.createEl("span", {
+        text: "Property name"
+      });
+      nameLabel.style.fontSize = "13px";
+      nameLabel.style.fontWeight = "500";
+
+      const nameInput = nameRow.createEl("input", {
+        type: "text",
+        value: group.name || "",
+        placeholder: "type"
+      });
+      nameInput.style.flex = "1";
+      nameInput.style.padding = "4px 8px";
+      nameInput.style.fontSize = "13px";
+      nameInput.style.background = "var(--background-primary)";
+      nameInput.style.border = "1px solid var(--background-modifier-border)";
+      nameInput.style.borderRadius = "4px";
+      nameInput.oninput = async () => {
+        group.name = nameInput.value.trim();
+        await this.plugin.saveSettings();
+      };
+
+      // Auto-update toggle
+      const toggleRow = card.createDiv();
+      toggleRow.style.display = "flex";
+      toggleRow.style.alignItems = "center";
+      toggleRow.style.gap = "8px";
+      toggleRow.style.marginBottom = "8px";
+
+      const toggleCheckbox = toggleRow.createEl("input", {
+        type: "checkbox"
+      });
+      toggleCheckbox.checked = group.autoUpdatePaths !== false;
+      toggleCheckbox.onchange = async () => {
+        group.autoUpdatePaths = toggleCheckbox.checked;
+        await this.plugin.saveSettings();
+      };
+
+      const toggleLabel = toggleRow.createEl("span", {
+        text: "Update paths on folder rename"
+      });
+      toggleLabel.style.fontSize = "12px";
+      toggleLabel.title = "When a folder is renamed in the vault, automatically update target paths for this property";
 
       const mappings = Array.isArray(group.mappings) ? group.mappings : [];
-      if (mappings.length === 0) {
-        containerEl.createEl("p", {
-          text: "Add one or more value-to-folder mappings for this property.",
-          cls: "setting-item-description"
-        });
-      }
 
-      // Show wildcard hint for this property
+      // Mappings header
+      const mappingsHeader = card.createDiv();
+      mappingsHeader.style.marginTop = "12px";
+      mappingsHeader.style.marginBottom = "4px";
+      mappingsHeader.style.display = "flex";
+      mappingsHeader.style.justifyContent = "space-between";
+
+      const mappingsTitle = mappingsHeader.createEl("span", {
+        text: mappings.length === 0
+          ? "Add value-to-folder mappings below"
+          : `${mappings.length} mapping${mappings.length > 1 ? "s" : ""}`
+      });
+      mappingsTitle.style.fontSize = "11px";
+      mappingsTitle.style.color = "var(--text-muted)";
+
       if (mappings.length > 0) {
-        containerEl.createEl("p", {
-          text: "💡 Tip: Use * as the property value to match ANY non-empty value (e.g., move all notes with this property to a folder using {property} variables)",
-          cls: "setting-item-description"
-        });
+        // Column headers
+        const colHeaders = card.createDiv();
+        colHeaders.style.display = "flex";
+        colHeaders.style.gap = "8px";
+        colHeaders.style.marginBottom = "4px";
+        colHeaders.style.paddingLeft = "2px";
+
+        const valHeader = colHeaders.createEl("span", { text: "Value" });
+        valHeader.style.fontSize = "11px";
+        valHeader.style.fontWeight = "600";
+        valHeader.style.color = "var(--text-muted)";
+        valHeader.style.width = "40%";
+
+        const folderHeader = colHeaders.createEl("span", { text: "Target folder" });
+        folderHeader.style.fontSize = "11px";
+        folderHeader.style.fontWeight = "600";
+        folderHeader.style.color = "var(--text-muted)";
+        folderHeader.style.width = "45%";
       }
 
+      // Mapping rows
       mappings.forEach((mapping, index) => {
-        const setting = new Setting(containerEl).setName(`Mapping ${index + 1}`);
+        const row = card.createDiv();
+        row.style.display = "flex";
+        row.style.alignItems = "center";
+        row.style.gap = "8px";
+        row.style.marginBottom = "4px";
 
-        setting.addText((text) =>
-          text
-            .setPlaceholder("task or * to match any value")
-            .setValue(mapping.value || "")
-            .onChange(async (value) => {
-              mapping.value = value;
-              await this.plugin.saveSettings();
-            })
-        );
-
-        setting.addText((text) =>
-          text
-            .setPlaceholder("Projects/Tasks or {project}/tasks/{priority}")
-            .setValue(mapping.folder || "")
-            .onChange(async (value) => {
-              mapping.folder = value;
-              await this.plugin.saveSettings();
-            })
-        );
-
-        setting.addExtraButton((button) => {
-          button
-            .setIcon("trash")
-            .setTooltip("Remove mapping")
-            .onClick(async () => {
-              mappings.splice(index, 1);
-              group.mappings = mappings;
-              await this.plugin.saveSettings();
-              this.display();
-            });
+        const valueInput = row.createEl("input", {
+          type: "text",
+          value: mapping.value || "",
+          placeholder: "task or *"
         });
+        valueInput.style.flex = "1";
+        valueInput.style.padding = "4px 8px";
+        valueInput.style.fontSize = "13px";
+        valueInput.style.background = "var(--background-primary)";
+        valueInput.style.border = "1px solid var(--background-modifier-border)";
+        valueInput.style.borderRadius = "4px";
+        valueInput.oninput = async () => {
+          mapping.value = valueInput.value;
+          await this.plugin.saveSettings();
+        };
+
+        const folderInput = row.createEl("input", {
+          type: "text",
+          value: mapping.folder || "",
+          placeholder: "Projects/Tasks"
+        });
+        folderInput.style.flex = "1";
+        folderInput.style.padding = "4px 8px";
+        folderInput.style.fontSize = "13px";
+        folderInput.style.background = "var(--background-primary)";
+        folderInput.style.border = "1px solid var(--background-modifier-border)";
+        folderInput.style.borderRadius = "4px";
+        folderInput.oninput = async () => {
+          mapping.folder = folderInput.value;
+          await this.plugin.saveSettings();
+        };
+
+        const mapTrash = row.createEl("button");
+        mapTrash.innerHTML = "<svg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><line x1='18' y1='6' x2='6' y2='18'></line><line x1='6' y1='6' x2='18' y2='18'></line></svg>";
+        mapTrash.style.background = "none";
+        mapTrash.style.border = "none";
+        mapTrash.style.cursor = "pointer";
+        mapTrash.style.color = "var(--text-muted)";
+        mapTrash.style.padding = "4px";
+        mapTrash.style.display = "flex";
+        mapTrash.style.alignItems = "center";
+        mapTrash.title = "Remove mapping";
+        mapTrash.onclick = async () => {
+          mappings.splice(index, 1);
+          group.mappings = mappings;
+          await this.plugin.saveSettings();
+          this.display();
+        };
       });
 
-      new Setting(containerEl).addButton((button) => {
-        button
-          .setButtonText("Add mapping")
-          .setCta()
-          .onClick(async () => {
-            mappings.push({ value: "", folder: "" });
-            group.mappings = mappings;
-            await this.plugin.saveSettings();
-            this.display();
-          });
-      });
+      // Add mapping button
+      const addMapRow = card.createDiv();
+      addMapRow.style.marginTop = "8px";
+      addMapRow.style.marginBottom = "4px";
+
+      const addMapBtn = addMapRow.createEl("button");
+      addMapBtn.textContent = "+ Add mapping";
+      addMapBtn.style.background = "none";
+      addMapBtn.style.border = "none";
+      addMapBtn.style.cursor = "pointer";
+      addMapBtn.style.color = "var(--text-accent)";
+      addMapBtn.style.fontSize = "12px";
+      addMapBtn.style.padding = "4px 0";
+      addMapBtn.onclick = async () => {
+        mappings.push({ value: "", folder: "" });
+        group.mappings = mappings;
+        await this.plugin.saveSettings();
+        this.display();
+      };
     });
+
+    // Divider before "Add property"
+    containerEl.createEl("hr");
 
     new Setting(containerEl).addButton((button) => {
       button
