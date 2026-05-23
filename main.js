@@ -1196,6 +1196,18 @@ class PropMoveSettingTab extends PluginSettingTab {
 
       const mappings = Array.isArray(group.mappings) ? group.mappings : [];
 
+      // Folder autocomplete datalist (shared across all mappings in this card)
+      const folderDatalistId = `propmove-folders-${groupIndex}`;
+      const folderDatalist = card.createEl("datalist", {
+        attr: { id: folderDatalistId }
+      });
+      folderDatalist.style.display = "none"; // hidden, datalists don't render visually
+      for (const folder of this.app.vault.getAllLoadedFiles()) {
+        if (folder instanceof TFolder) {
+          folderDatalist.createEl("option", { attr: { value: folder.path } });
+        }
+      }
+
       // Mappings header
       const mappingsHeader = card.createDiv();
       mappingsHeader.style.marginTop = "12px";
@@ -1266,7 +1278,8 @@ class PropMoveSettingTab extends PluginSettingTab {
         const folderInput = row.createEl("input", {
           type: "text",
           value: mapping.folder || "",
-          placeholder: "Projects/Tasks"
+          placeholder: "Projects/Tasks",
+          attr: { list: folderDatalistId }
         });
         folderInput.style.flex = "1";
         folderInput.style.padding = "4px 8px";
