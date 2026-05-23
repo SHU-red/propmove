@@ -1128,16 +1128,31 @@ class PropMoveSettingTab extends PluginSettingTab {
       nameLabel.style.fontSize = "13px";
       nameLabel.style.fontWeight = "500";
 
-      // Autocomplete datalist from vault properties (Obsidian 1.7+ only)
+      // Autocomplete datalist from vault properties
       const datalistId = `propmove-datalist-${groupIndex}`;
       const datalist = nameRow.createEl("datalist", {
         attr: { id: datalistId }
       });
+      // Try native API first (Obsidian 1.7+), fallback to manual scan
+      let propKeys = [];
       if (typeof this.app.metadataCache.getAllMetadataProperties === 'function') {
         const vaultProps = this.app.metadataCache.getAllMetadataProperties();
-        for (const key of Object.keys(vaultProps).sort()) {
-          datalist.createEl("option", { attr: { value: key } });
+        propKeys = Object.keys(vaultProps).sort();
+      } else {
+        // Manual fallback: scan all markdown files for frontmatter keys
+        const seen = new Set();
+        for (const file of this.app.vault.getMarkdownFiles()) {
+          const cache = this.app.metadataCache.getFileCache(file);
+          if (cache && cache.frontmatter) {
+            for (const key of Object.keys(cache.frontmatter)) {
+              seen.add(key);
+            }
+          }
         }
+        propKeys = Array.from(seen).sort();
+      }
+      for (const key of propKeys) {
+        datalist.createEl("option", { attr: { value: key } });
       }
 
       const nameInput = nameRow.createEl("input", {
