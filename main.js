@@ -1128,14 +1128,16 @@ class PropMoveSettingTab extends PluginSettingTab {
       nameLabel.style.fontSize = "13px";
       nameLabel.style.fontWeight = "500";
 
-      // Autocomplete datalist from vault properties
+      // Autocomplete datalist from vault properties (Obsidian 1.7+ only)
       const datalistId = `propmove-datalist-${groupIndex}`;
       const datalist = nameRow.createEl("datalist", {
         attr: { id: datalistId }
       });
-      const vaultProps = this.app.metadataCache.getAllMetadataProperties();
-      for (const key of Object.keys(vaultProps).sort()) {
-        datalist.createEl("option", { attr: { value: key } });
+      if (typeof this.app.metadataCache.getAllMetadataProperties === 'function') {
+        const vaultProps = this.app.metadataCache.getAllMetadataProperties();
+        for (const key of Object.keys(vaultProps).sort()) {
+          datalist.createEl("option", { attr: { value: key } });
+        }
       }
 
       const nameInput = nameRow.createEl("input", {
@@ -1218,7 +1220,7 @@ class PropMoveSettingTab extends PluginSettingTab {
         const folderHeader = colHeaders.createEl("span", { text: "Target folder" });
         folderHeader.style.fontSize = "11px";
         folderHeader.style.fontWeight = "600";
-        folderHeader.style.color = "var(--text-muted";
+        folderHeader.style.color = "var(--text-muted)";
         folderHeader.style.flex = "1";
       }
 
