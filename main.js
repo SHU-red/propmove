@@ -57,7 +57,7 @@ class FileProcessor {
       if (normalizedValues.length === 0) continue;
 
       const mappings = Array.isArray(group.mappings) ? group.mappings : [];
-      const mapping = this.findMatchingMapping(mappings, normalizedValues);
+      const mapping = this.findMatchingMapping(mappings, normalizedValues, rawValue, propName);
 
       if (mapping) {
         const targetFolder = String(mapping.folder || "").trim();
@@ -70,11 +70,31 @@ class FileProcessor {
 
   /**
    * Find matching mapping considering case sensitivity setting
-   * Supports wildcard '*' to match any non-empty property value
+   * Supports: wildcard '*', operator field (equals, contains, is-empty, is-not-empty)
    */
-  findMatchingMapping(mappings, normalizedValues) {
+  findMatchingMapping(mappings, normalizedValues, rawFrontmatterValue, propName) {
     for (const item of mappings) {
+      const operator = (item.operator || "equals").trim();
       const mappingValue = String(item.value || "").trim();
+
+      // --- Presence operators (ignore value field) ---
+      if (operator === "is-empty") {
+        if (normalizedValues.length === 0) {
+          this.logger.debug(`[MATCH] is-empty matched for "${propName}"`);
+          return item;
+        }
+        continue;
+      }
+
+      if (operator === "is-not-empty") {
+        if (normalizedValues.length > 0) {
+          this.logger.debug(`[MATCH] is-not-empty matched for "${propName}"`);
+          return item;
+        }
+        continue;
+      }
+
+      // --- Value operators ---
       if (mappingValue.length === 0) continue;
 
       // Wildcard match - '*' matches any non-empty value
@@ -86,9 +106,21 @@ class FileProcessor {
         continue;
       }
 
-      const isMatch = this.settings.caseInsensitiveMatching
-        ? normalizedValues.some(v => v.toLowerCase() === mappingValue.toLowerCase())
-        : normalizedValues.includes(mappingValue);
+      let isMatch;
+      if (operator === "contains") {
+        const check = this.settings.caseInsensitiveMatching
+          ? mappingValue.toLowerCase()
+          : mappingValue;
+        isMatch = normalizedValues.some(v => {
+          const val = this.settings.caseInsensitiveMatching ? v.toLowerCase() : v;
+          return val.includes(check);
+        });
+      } else {
+        // Default: equals
+        isMatch = this.settings.caseInsensitiveMatching
+          ? normalizedValues.some(v => v.toLowerCase() === mappingValue.toLowerCase())
+          : normalizedValues.includes(mappingValue);
+      }
 
       if (isMatch) return item;
     }
@@ -726,7 +758,11 @@ module.exports = class PropMove extends Plugin {
 
     this.settings.properties = properties.map((group) => ({
       name: String(group.name || "").trim(),
-      mappings: Array.isArray(group.mappings) ? group.mappings : [],
+      mappings: (Array.isArray(group.mappings) ? group.mappings : []).map((m) => ({
+        value: String(m.value || "").trim(),
+        folder: String(m.folder || ""),
+        operator: m.operator || "equals" // default equals
+      })),
       autoUpdatePaths: group.autoUpdatePaths !== false // default true
     }));
 
@@ -1092,10 +1128,21 @@ class PropMoveSettingTab extends PluginSettingTab {
       nameLabel.style.fontSize = "13px";
       nameLabel.style.fontWeight = "500";
 
+      // Autocomplete datalist from vault properties
+      const datalistId = `propmove-datalist-${groupIndex}`;
+      const datalist = nameRow.createEl("datalist", {
+        attr: { id: datalistId }
+      });
+      const vaultProps = this.app.metadataCache.getAllMetadataProperties();
+      for (const key of Object.keys(vaultProps).sort()) {
+        datalist.createEl("option", { attr: { value: key } });
+      }
+
       const nameInput = nameRow.createEl("input", {
         type: "text",
         value: group.name || "",
-        placeholder: "type"
+        placeholder: "type",
+        attr: { list: datalistId }
       });
       nameInput.style.flex = "1";
       nameInput.style.padding = "4px 8px";
@@ -1159,13 +1206,20 @@ class PropMoveSettingTab extends PluginSettingTab {
         valHeader.style.fontSize = "11px";
         valHeader.style.fontWeight = "600";
         valHeader.style.color = "var(--text-muted)";
-        valHeader.style.width = "40%";
+        valHeader.style.width = "30%";
+
+        const opHeader = colHeaders.createEl("span", { text: "Match" });
+        opHeader.style.fontSize = "11px";
+        opHeader.style.fontWeight = "600";
+        opHeader.style.color = "var(--text-muted)";
+        opHeader.style.width = "90px";
+        opHeader.style.minWidth = "90px";
 
         const folderHeader = colHeaders.createEl("span", { text: "Target folder" });
         folderHeader.style.fontSize = "11px";
         folderHeader.style.fontWeight = "600";
-        folderHeader.style.color = "var(--text-muted)";
-        folderHeader.style.width = "45%";
+        folderHeader.style.color = "var(--text-muted";
+        folderHeader.style.flex = "1";
       }
 
       // Mapping rows
@@ -1205,6 +1259,28 @@ class PropMoveSettingTab extends PluginSettingTab {
         folderInput.style.borderRadius = "4px";
         folderInput.oninput = async () => {
           mapping.folder = folderInput.value;
+          await this.plugin.saveSettings();
+        };
+
+        // Operator select
+        const operatorSelect = row.createEl("select");
+        operatorSelect.style.flex = "0";
+        operatorSelect.style.padding = "4px";
+        operatorSelect.style.fontSize = "12px";
+        operatorSelect.style.background = "var(--background-primary)";
+        operatorSelect.style.border = "1px solid var(--background-modifier-border)";
+        operatorSelect.style.borderRadius = "4px";
+        operatorSelect.style.minWidth = "80px";
+        const currentOp = mapping.operator || "equals";
+        for (const op of ["equals", "contains", "is empty", "is not empty"]) {
+          const opt = operatorSelect.createEl("option", {
+            text: op.replace(/-/g, " ").replace(/^\w/, c => c.toUpperCase()),
+            value: op.replace(/ /g, "-")
+          });
+          if (op.replace(/ /g, "-") === currentOp) opt.selected = true;
+        }
+        operatorSelect.onchange = async () => {
+          mapping.operator = operatorSelect.value;
           await this.plugin.saveSettings();
         };
 

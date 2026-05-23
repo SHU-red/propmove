@@ -386,6 +386,134 @@ for (const test of renameTests) {
   }
 }
 
-const total = unitTests.length + integrationTests.length + renameTests.length;
+// --- Operator matching tests ---
+function simulateFindMatchingMapping(mappings, normalizedValues, settings) {
+  const caseInsensitive = settings.caseInsensitiveMatching || false;
+  for (const item of mappings) {
+    const operator = (item.operator || "equals").trim();
+    const mappingValue = String(item.value || "").trim();
+
+    // Presence operators
+    if (operator === "is-empty") {
+      if (normalizedValues.length === 0) return item;
+      continue;
+    }
+    if (operator === "is-not-empty") {
+      if (normalizedValues.length > 0) return item;
+      continue;
+    }
+
+    if (mappingValue.length === 0) continue;
+
+    // Wildcard
+    if (mappingValue === "*") {
+      if (normalizedValues.length > 0) return item;
+      continue;
+    }
+
+    let isMatch;
+    if (operator === "contains") {
+      const check = caseInsensitive ? mappingValue.toLowerCase() : mappingValue;
+      isMatch = normalizedValues.some(v => {
+        const val = caseInsensitive ? v.toLowerCase() : v;
+        return val.includes(check);
+      });
+    } else {
+      // equals
+      isMatch = caseInsensitive
+        ? normalizedValues.some(v => v.toLowerCase() === mappingValue.toLowerCase())
+        : normalizedValues.includes(mappingValue);
+    }
+
+    if (isMatch) return item;
+  }
+  return null;
+}
+
+const operatorTests = [
+  { desc: "equals default (no operator field)",
+    mappings: [{ value: "inbox", folder: "Inbox" }],
+    values: ["inbox"], settings: {},
+    expectFolder: "Inbox" },
+  { desc: "equals no match",
+    mappings: [{ value: "inbox", folder: "Inbox" }],
+    values: ["archive"], settings: {},
+    expectFolder: null },
+  { desc: "equals case insensitive",
+    mappings: [{ value: "inbox", folder: "Inbox", operator: "equals" }],
+    values: ["INBOX"], settings: { caseInsensitiveMatching: true },
+    expectFolder: "Inbox" },
+  { desc: "equals case sensitive no match",
+    mappings: [{ value: "inbox", folder: "Inbox", operator: "equals" }],
+    values: ["INBOX"], settings: { caseInsensitiveMatching: false },
+    expectFolder: null },
+  { desc: "contains single value",
+    mappings: [{ value: "task", folder: "Tasks", operator: "contains" }],
+    values: ["my task note"], settings: {},
+    expectFolder: "Tasks" },
+  { desc: "contains no match",
+    mappings: [{ value: "urgent", folder: "Urgent", operator: "contains" }],
+    values: ["normal task"], settings: {},
+    expectFolder: null },
+  { desc: "contains in array",
+    mappings: [{ value: "physics", folder: "Science", operator: "contains" }],
+    values: ["tag1", "my physics note", "tag3"], settings: {},
+    expectFolder: "Science" },
+  { desc: "contains case insensitive",
+    mappings: [{ value: "task", folder: "Tasks", operator: "contains" }],
+    values: ["MY TASK"], settings: { caseInsensitiveMatching: true },
+    expectFolder: "Tasks" },
+  { desc: "is-empty matches empty",
+    mappings: [{ value: "", folder: "Inbox", operator: "is-empty" }],
+    values: [], settings: {},
+    expectFolder: "Inbox" },
+  { desc: "is-empty no match on value",
+    mappings: [{ value: "", folder: "Inbox", operator: "is-empty" }],
+    values: ["something"], settings: {},
+    expectFolder: null },
+  { desc: "is-not-empty matches value",
+    mappings: [{ value: "", folder: "Categorized", operator: "is-not-empty" }],
+    values: ["anything"], settings: {},
+    expectFolder: "Categorized" },
+  { desc: "is-not-empty no match on empty",
+    mappings: [{ value: "", folder: "Categorized", operator: "is-not-empty" }],
+    values: [], settings: {},
+    expectFolder: null },
+  { desc: "first matching operator wins",
+    mappings: [
+      { value: "draft", folder: "Drafts", operator: "equals" },
+      { value: "", folder: "Inbox", operator: "is-empty" }
+    ],
+    values: ["draft"], settings: {},
+    expectFolder: "Drafts" },
+  { desc: "fallback to is-empty when equals misses",
+    mappings: [
+      { value: "draft", folder: "Drafts", operator: "equals" },
+      { value: "", folder: "Inbox", operator: "is-empty" }
+    ],
+    values: [], settings: {},
+    expectFolder: "Inbox" },
+  { desc: "wildcard still works alongside operators",
+    mappings: [
+      { value: "high", folder: "Urgent", operator: "equals" },
+      { value: "*", folder: "Normal" }
+    ],
+    values: ["medium"], settings: {},
+    expectFolder: "Normal" }
+];
+
+for (const test of operatorTests) {
+  const result = simulateFindMatchingMapping(test.mappings, test.values, test.settings);
+  const actualFolder = result ? result.folder : null;
+  const ok = actualFolder === test.expectFolder;
+  if (ok) pass++; else fail++;
+  console.log(ok ? 'PASS' : 'FAIL', test.desc);
+  if (!ok) {
+    console.log(`  expected: ${test.expectFolder}`);
+    console.log(`  got:      ${actualFolder}`);
+  }
+}
+
+const total = unitTests.length + integrationTests.length + renameTests.length + operatorTests.length;
 console.log(`\n${pass}/${total} passed`);
 process.exit(fail > 0 ? 1 : 0);
