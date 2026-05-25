@@ -1030,7 +1030,12 @@ function collectVaultPropertyValues(app, propName) {
       const raw = cache.frontmatter[propName];
       const vals = Array.isArray(raw) ? raw : [raw];
       for (const v of vals) {
-        const trimmed = String(v).trim();
+        let trimmed = String(v).trim();
+        // Strip surrounding quotes (YAML empty strings: "")
+        if ((trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+            (trimmed.startsWith("'") && trimmed.endsWith("'"))) {
+          trimmed = trimmed.slice(1, -1);
+        }
         if (trimmed.length > 0) {
           values.add(trimmed);
         }
