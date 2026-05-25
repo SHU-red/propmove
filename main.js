@@ -6,7 +6,8 @@ const {
   TFolder,
   normalizePath,
   Notice,
-  Command
+  Command,
+  Modal
 } = require("obsidian");
 
 const DEFAULT_SETTINGS = {
@@ -444,6 +445,20 @@ module.exports = class PropMove extends Plugin {
       callback: () => this.previewMoves()
     });
 
+    // Register process folder command
+    this.addCommand({
+      id: "process-folder",
+      name: "Process files in specific folder",
+      callback: () => this.promptFolderAndProcess()
+    });
+
+    // Register preview folder command
+    this.addCommand({
+      id: "preview-folder",
+      name: "Preview moves in specific folder",
+      callback: () => this.promptFolderAndPreview()
+    });
+
     // Register event handlers conditionally based on settings
     if (this.settings.moveOnCreate && !this.settings.manualTriggerOnly) {
       this.registerEvent(
@@ -585,15 +600,51 @@ module.exports = class PropMove extends Plugin {
    * Process all files according to property rules
    */
   async processAllFiles() {
+    await this.processFiles(this.app.vault.getMarkdownFiles());
+  }
+
+  /**
+   * Process files in a specific folder (including subfolders).
+   * @param {string} folderPath - Folder path to process
+   */
+  async processFolder(folderPath) {
+    const folder = this.app.vault.getAbstractFileByPath(folderPath);
+    if (!(folder instanceof TFolder)) {
+      new Notice(`PropMove: Folder not found: ${folderPath}`);
+      return;
+    }
+
+    const normalizedFolder = normalizePath(folderPath);
+    const files = this.app.vault.getMarkdownFiles().filter(f =>
+      f.path.startsWith(normalizedFolder + '/')
+    );
+
+    if (files.length === 0) {
+      new Notice(`PropMove: No markdown files in "${folderPath}"`);
+      return;
+    }
+
+    await this.processFiles(files);
+  }
+
+  /**
+   * Core file processing loop with chunking for performance.
+   * @param {TFile[]} files - Files to process
+   */
+  async processFiles(files) {
     this.logger.debug("Starting manual processing of all files");
 
-    const files = this.app.vault.getMarkdownFiles();
     let processedCount = 0;
     let movedCount = 0;
     let skippedCount = 0;
     const maxFiles = this.settings.maxFilesPerBatch > 0 ? this.settings.maxFilesPerBatch : files.length;
 
     for (const file of files) {
+      // Yield to UI thread every 50 files to keep the UI responsive
+      if (processedCount % 50 === 0 && processedCount > 0) {
+        await new Promise(resolve => setTimeout(resolve, 10));
+      }
+
       if (processedCount >= maxFiles) {
         this.logger.debug(`Reached maximum files per batch: ${maxFiles}`);
         break;
@@ -629,9 +680,40 @@ module.exports = class PropMove extends Plugin {
    * Preview what moves would be made without actually moving files
    */
   async previewMoves() {
+    await this.previewFiles(this.app.vault.getMarkdownFiles());
+  }
+
+  /**
+   * Preview moves in a specific folder (including subfolders).
+   * @param {string} folderPath - Folder path to preview
+   */
+  async previewFolder(folderPath) {
+    const folder = this.app.vault.getAbstractFileByPath(folderPath);
+    if (!(folder instanceof TFolder)) {
+      new Notice(`PropMove: Folder not found: ${folderPath}`);
+      return;
+    }
+
+    const normalizedFolder = normalizePath(folderPath);
+    const files = this.app.vault.getMarkdownFiles().filter(f =>
+      f.path.startsWith(normalizedFolder + '/')
+    );
+
+    if (files.length === 0) {
+      new Notice(`PropMove: No markdown files in "${folderPath}"`);
+      return;
+    }
+
+    await this.previewFiles(files);
+  }
+
+  /**
+   * Core preview loop.
+   * @param {TFile[]} files - Files to preview
+   */
+  async previewFiles(files) {
     this.logger.debug("Starting preview of moves");
 
-    const files = this.app.vault.getMarkdownFiles();
     const previews = [];
     let moveCount = 0;
     let skipCount = 0;
@@ -688,6 +770,54 @@ module.exports = class PropMove extends Plugin {
     const message = `PropMove Preview: ${moveCount} would move, ${skipCount} would skip. Check console for details.`;
     this.logger.info(message);
     new Notice(message);
+  }
+
+  /**
+   * Prompt user to select a folder and process it.
+   */
+  promptFolderAndProcess() {
+    const folders = this.collectAllFolders();
+    const modal = new FolderPickerModal(this.app, folders, (folder) => {
+      if (folder) {
+        this.processFolder(folder);
+      }
+    });
+    modal.open();
+  }
+
+  /**
+   * Prompt user to select a folder and preview moves.
+   */
+  promptFolderAndPreview() {
+    const folders = this.collectAllFolders();
+    const modal = new FolderPickerModal(this.app, folders, (folder) => {
+      if (folder) {
+        this.previewFolder(folder);
+      }
+    });
+    modal.open();
+  }
+
+  /**
+   * Collect all folder paths recursively for suggestions.
+   * @returns {string[]} All folder paths in the vault
+   */
+  collectAllFolders() {
+    const folders = [];
+    const root = this.app.vault.getRoot();
+
+    const traverse = (folder) => {
+      if (folder instanceof TFolder) {
+        folders.push(folder.path);
+        folder.children.forEach(traverse);
+      }
+    };
+
+    if (root) {
+      root.children.forEach(traverse);
+    }
+
+    return folders;
   }
 
   /**
@@ -1117,53 +1247,57 @@ class PropMoveSettingTab extends PluginSettingTab {
           })
       );
 
+    // Automatic Triggers section (hidden when manual trigger only is enabled)
+    if (!this.plugin.settings.manualTriggerOnly) {
+      containerEl.createEl("hr");
+      containerEl.createEl("h3", { text: "Automatic Triggers" });
+
+      containerEl.createEl("p", {
+        text: "Configure when files should be automatically moved based on property changes.",
+        cls: "setting-item-description"
+      });
+
+      // Trigger event settings
+      const triggerSettings = [
+        {
+          name: "Move on file creation",
+          desc: "Move files when they are first created",
+          setting: "moveOnCreate"
+        },
+        {
+          name: "Move on property change",
+          desc: "Move files when their frontmatter properties are modified",
+          setting: "moveOnMetadataChange"
+        },
+        {
+          name: "Move on startup",
+          desc: "Move files when Obsidian starts up (based on current property rules)",
+          setting: "moveOnStartup"
+        }
+      ];
+
+      triggerSettings.forEach((trigger) => {
+        new Setting(containerEl)
+          .setName(trigger.name)
+          .setDesc(trigger.desc)
+          .addToggle((toggle) =>
+            toggle
+              .setValue(this.plugin.settings[trigger.setting])
+              .onChange(async (value) => {
+                this.plugin.settings[trigger.setting] = value;
+                await this.plugin.saveSettings();
+              })
+          );
+      });
+    }
+
     containerEl.createEl("hr");
-    containerEl.createEl("h3", { text: "Automatic Triggers" });
+    containerEl.createEl("h3", { text: "Manual Triggers" });
 
-    containerEl.createEl("p", {
-      text: "Configure when files should be automatically moved based on property changes.",
-      cls: "setting-item-description"
-    });
-
-    // Trigger event settings
-    const triggerSettings = [
-      {
-        name: "Move on file creation",
-        desc: "Move files when they are first created",
-        setting: "moveOnCreate",
-        disabled: this.plugin.settings.manualTriggerOnly
-      },
-      {
-        name: "Move on property change",
-        desc: "Move files when their frontmatter properties are modified",
-        setting: "moveOnMetadataChange",
-        disabled: this.plugin.settings.manualTriggerOnly
-      },
-      {
-        name: "Move on startup",
-        desc: "Move files when Obsidian starts up (based on current property rules)",
-        setting: "moveOnStartup",
-        disabled: this.plugin.settings.manualTriggerOnly
-      }
-    ];
-
-    triggerSettings.forEach((trigger) => {
-      new Setting(containerEl)
-        .setName(trigger.name)
-        .setDesc(trigger.desc)
-        .addToggle((toggle) =>
-          toggle
-            .setValue(this.plugin.settings[trigger.setting])
-            .setDisabled(trigger.disabled)
-            .onChange(async (value) => {
-              this.plugin.settings[trigger.setting] = value;
-              await this.plugin.saveSettings();
-            })
-        );
-    });
-
-    // Manual trigger button
+    // Process all files button
     new Setting(containerEl)
+      .setName("Process all files")
+      .setDesc("Move all files based on current property rules")
       .addButton((button) =>
         button
           .setButtonText("Process all files now")
@@ -1175,6 +1309,8 @@ class PropMoveSettingTab extends PluginSettingTab {
 
     // Preview button
     new Setting(containerEl)
+      .setName("Preview moves")
+      .setDesc("Show what moves would be made without actually moving files")
       .addButton((button) =>
         button
           .setButtonText("Preview moves (read-only)")
@@ -1183,7 +1319,20 @@ class PropMoveSettingTab extends PluginSettingTab {
           })
       );
 
+    // Process folder button
+    new Setting(containerEl)
+      .setName("Process folder")
+      .setDesc("Select a specific folder to process files in")
+      .addButton((button) =>
+        button
+          .setButtonText("Process folder...")
+          .onClick(() => {
+            this.plugin.promptFolderAndProcess();
+          })
+      );
+
     containerEl.createEl("hr");
+    containerEl.createEl("h3", { text: "Move Behavior" });
 
     // Auto-append suffix setting
     new Setting(containerEl)
@@ -1334,7 +1483,7 @@ class PropMoveSettingTab extends PluginSettingTab {
     });
 
     containerEl.createEl("hr");
-    containerEl.createEl("h3", { text: "Property Mappings" });
+    containerEl.createEl("h3", { text: "Mappings" });
 
     containerEl.createEl("p", {
       text: "Use {propertyName} to create dynamic paths based on frontmatter values."
@@ -1391,7 +1540,7 @@ class PropMoveSettingTab extends PluginSettingTab {
       header.style.paddingBottom = "8px";
 
       const title = header.createEl("strong", {
-        text: `Property ${groupIndex + 1}`
+        text: `Mapping ${groupIndex + 1}`
       });
       title.style.fontSize = "14px";
 
@@ -1404,7 +1553,7 @@ class PropMoveSettingTab extends PluginSettingTab {
       trashBtn.style.padding = "4px";
       trashBtn.style.display = "flex";
       trashBtn.style.alignItems = "center";
-      trashBtn.title = "Remove property";
+      trashBtn.title = "Remove mapping";
       trashBtn.onclick = async () => {
         this.plugin.settings.properties.splice(groupIndex, 1);
         await this.plugin.saveSettings();
@@ -1644,7 +1793,7 @@ class PropMoveSettingTab extends PluginSettingTab {
 
     new Setting(containerEl).addButton((button) => {
       button
-        .setButtonText("Add property")
+        .setButtonText("Add mapping")
         .setCta()
         .onClick(async () => {
           this.plugin.settings.properties.push({ name: "", mappings: [] });
@@ -1652,5 +1801,121 @@ class PropMoveSettingTab extends PluginSettingTab {
           this.display();
         });
     });
+  }
+
+}
+
+/**
+ * Simple folder picker modal with autocomplete.
+ */
+class FolderPickerModal extends Modal {
+  constructor(app, folders, onSubmit) {
+    super(app);
+    this.folders = folders;
+    this.onSubmit = onSubmit;
+  }
+
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.createEl("h3", { text: "Select Folder" });
+
+    const input = contentEl.createEl("input", {
+      type: "text",
+      placeholder: "Type to search folders..."
+    });
+    input.setAttribute("autofocus", "");
+
+    // Dropdown for suggestions
+    const dropdown = contentEl.createDiv("folder-picker-dropdown");
+    dropdown.style.maxHeight = "200px";
+    dropdown.style.overflowY = "auto";
+    dropdown.style.border = "1px solid var(--background-modifier-border)";
+    dropdown.style.borderRadius = "4px";
+    dropdown.style.padding = "4px 0";
+    dropdown.style.display = "none";
+
+    const showSuggestions = (filter = "") => {
+      dropdown.empty();
+      const filtered = this.folders.filter(f =>
+        f.toLowerCase().includes(filter.toLowerCase())
+      ).slice(0, 20); // Limit to 20 suggestions
+
+      if (filtered.length === 0) {
+        dropdown.style.display = "none";
+        return;
+      }
+
+      dropdown.style.display = "block";
+
+      filtered.forEach(folder => {
+        const item = dropdown.createDiv("folder-picker-item");
+        item.textContent = folder || "/ (root)";
+        item.style.padding = "4px 8px";
+        item.style.cursor = "pointer";
+
+        item.onclick = () => {
+          this.close();
+          this.onSubmit(folder);
+        };
+
+        item.onmouseover = () => {
+          item.style.backgroundColor = "var(--background-modifier-hover)";
+        };
+
+        item.onmouseout = () => {
+          item.style.backgroundColor = "";
+        };
+      });
+    };
+
+    input.addEventListener("input", () => {
+      showSuggestions(input.value);
+    });
+
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        const value = input.value.trim();
+        // Check if value matches a folder
+        const match = this.folders.find(f => f === value);
+        if (match !== undefined) {
+          this.close();
+          this.onSubmit(match);
+        }
+      } else if (e.key === "Escape") {
+        this.close();
+      }
+    });
+
+    // Submit button
+    const btnContainer = contentEl.createDiv({
+      style: "margin-top: 16px; text-align: right;"
+    });
+
+    const btn = btnContainer.createEl("button", {
+      text: "Process Folder",
+      cls: "mod-cta"
+    });
+
+    btn.onclick = () => {
+      const value = input.value.trim();
+      const match = this.folders.find(f => f === value);
+      if (match !== undefined) {
+        this.close();
+        this.onSubmit(match);
+      } else {
+        new Notice("Folder not found");
+      }
+    };
+
+    // Show all suggestions initially
+    showSuggestions();
+
+    // Focus input
+    setTimeout(() => input.focus(), 50);
+  }
+
+  onClose() {
+    const { contentEl } = this;
+    contentEl.empty();
   }
 }
