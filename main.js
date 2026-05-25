@@ -23,7 +23,8 @@ const DEFAULT_SETTINGS = {
   processingDelay: 150,
   maxFilesPerBatch: 0,
   caseInsensitiveMatching: false,
-  autoCreateFolders: true
+  autoCreateFolders: true,
+  showRibbonIcon: true
 };
 
 /**
@@ -431,6 +432,9 @@ module.exports = class PropMove extends Plugin {
 
     this.addSettingTab(new PropMoveSettingTab(this.app, this));
 
+    // Ribbon icon (configurable)
+    this.setupRibbonIcon();
+
     // Register manual trigger command
     this.addCommand({
       id: "trigger-manual-process",
@@ -818,6 +822,72 @@ module.exports = class PropMove extends Plugin {
     }
 
     return folders;
+  }
+
+  /**
+   * Render manual trigger buttons into a container using Obsidian's Setting API.
+   * Shared between the settings tab and the ribbon icon modal.
+   */
+  renderManualTriggers(containerEl) {
+    new Setting(containerEl)
+      .setName("Process all files")
+      .setDesc("Move all files based on current property rules")
+      .addButton((button) =>
+        button
+          .setButtonText("Process all files now")
+          .setCta()
+          .onClick(async () => {
+            await this.processAllFiles();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Preview moves")
+      .setDesc("Show what moves would be made without actually moving files")
+      .addButton((button) =>
+        button
+          .setButtonText("Preview moves (read-only)")
+          .onClick(async () => {
+            await this.previewMoves();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Process folder")
+      .setDesc("Select a specific folder to process files in")
+      .addButton((button) =>
+        button
+          .setButtonText("Process folder...")
+          .onClick(() => {
+            this.promptFolderAndProcess();
+          })
+      );
+  }
+
+  /**
+   * Set up or remove the ribbon icon based on settings.
+   */
+  setupRibbonIcon() {
+    // Remove existing icon if present
+    if (this.ribbonIconEl) {
+      this.ribbonIconEl.remove();
+      this.ribbonIconEl = null;
+    }
+
+    if (!this.settings.showRibbonIcon) return;
+
+    // Option F: Minimal + Arrow SVG
+    const svgPath = `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="12" height="12" rx="2"/><path d="M15 15l6 6"/><path d="M21 15v6h-6"/></svg>`;
+
+    this.ribbonIconEl = this.addRibbonIcon("move", "PropMove: Quick actions", () => {
+      new ManualTriggerModal(this.app, this).open();
+    });
+
+    // Replace the default icon with our custom SVG
+    const iconEl = this.ribbonIconEl.querySelector("svg");
+    if (iconEl) {
+      iconEl.outerHTML = svgPath;
+    }
   }
 
   /**
@@ -1214,6 +1284,31 @@ function createSuggestInput(container, options) {
   };
 }
 
+/**
+ * Compact overlay modal with manual trigger buttons.
+ * Opens from the ribbon icon in the sidebar.
+ */
+class ManualTriggerModal extends Modal {
+  constructor(app, plugin) {
+    super(app);
+    this.plugin = plugin;
+    this.title = "PropMove";
+  }
+
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.empty();
+
+    // Render the same buttons as in the settings tab
+    this.plugin.renderManualTriggers(contentEl);
+  }
+
+  onClose() {
+    const { contentEl } = this;
+    contentEl.empty();
+  }
+}
+
 
 class PropMoveSettingTab extends PluginSettingTab {
   constructor(app, plugin) {
@@ -1246,6 +1341,13 @@ class PropMoveSettingTab extends PluginSettingTab {
             this.display();
           })
       );
+
+    // Manual Triggers section (always visible, right at the top)
+    containerEl.createEl("hr");
+    containerEl.createEl("h3", { text: "Manual Triggers" });
+
+    // Render shared manual trigger buttons
+    this.plugin.renderManualTriggers(containerEl);
 
     // Automatic Triggers section (hidden when manual trigger only is enabled)
     if (!this.plugin.settings.manualTriggerOnly) {
@@ -1290,46 +1392,6 @@ class PropMoveSettingTab extends PluginSettingTab {
           );
       });
     }
-
-    containerEl.createEl("hr");
-    containerEl.createEl("h3", { text: "Manual Triggers" });
-
-    // Process all files button
-    new Setting(containerEl)
-      .setName("Process all files")
-      .setDesc("Move all files based on current property rules")
-      .addButton((button) =>
-        button
-          .setButtonText("Process all files now")
-          .setCta()
-          .onClick(async () => {
-            await this.plugin.processAllFiles();
-          })
-      );
-
-    // Preview button
-    new Setting(containerEl)
-      .setName("Preview moves")
-      .setDesc("Show what moves would be made without actually moving files")
-      .addButton((button) =>
-        button
-          .setButtonText("Preview moves (read-only)")
-          .onClick(async () => {
-            await this.plugin.previewMoves();
-          })
-      );
-
-    // Process folder button
-    new Setting(containerEl)
-      .setName("Process folder")
-      .setDesc("Select a specific folder to process files in")
-      .addButton((button) =>
-        button
-          .setButtonText("Process folder...")
-          .onClick(() => {
-            this.plugin.promptFolderAndProcess();
-          })
-      );
 
     containerEl.createEl("hr");
     containerEl.createEl("h3", { text: "Move Behavior" });
@@ -1380,8 +1442,23 @@ class PropMoveSettingTab extends PluginSettingTab {
       );
 
     containerEl.createEl("hr");
+    containerEl.createEl("h3", { text: "Ribbon Icon" });
 
-    // Performance settings
+    // Show ribbon icon toggle (dedicated section)
+    new Setting(containerEl)
+      .setName("Show ribbon icon")
+      .setDesc("Display a ribbon icon in the sidebar that opens this settings page")
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.showRibbonIcon)
+          .onChange(async (value) => {
+            this.plugin.settings.showRibbonIcon = value;
+            await this.plugin.saveSettings();
+            this.plugin.setupRibbonIcon();
+          })
+      );
+
+    containerEl.createEl("hr");
     containerEl.createEl("h3", { text: "Performance Settings" });
 
     new Setting(containerEl)
