@@ -1208,12 +1208,47 @@ class PropMoveSettingTab extends PluginSettingTab {
         }
       }
 
+      // Value autocomplete datalist — scan vault for existing values of this property
+      const valueDatalistId = `propmove-values-${groupIndex}`;
+      const valueDatalist = card.createEl("datalist", {
+        attr: { id: valueDatalistId }
+      });
+      valueDatalist.style.display = "none";
+      // Collect existing values for the current property name
+      const propName = group.name || "";
+      const existingValues = new Set();
+      if (propName) {
+        for (const file of this.app.vault.getMarkdownFiles()) {
+          const cache = this.app.metadataCache.getFileCache(file);
+          if (cache && cache.frontmatter && cache.frontmatter[propName] !== undefined) {
+            const raw = cache.frontmatter[propName];
+            const vals = Array.isArray(raw) ? raw : [raw];
+            for (const v of vals) {
+              const trimmed = String(v).trim();
+              if (trimmed.length > 0) {
+                existingValues.add(trimmed);
+              }
+            }
+          }
+        }
+      }
+      for (const val of existingValues) {
+        valueDatalist.createEl("option", { attr: { value: val } });
+      }
+      // Always include wildcard option
+      valueDatalist.createEl("option", { attr: { value: "*" } });
+
+      // Mappings section container (scrollable to prevent overflow)
+      const mappingsContainer = card.createDiv();
+      mappingsContainer.style.marginTop = "12px";
+      mappingsContainer.style.maxHeight = "350px";
+      mappingsContainer.style.overflowY = mappings.length > 8 ? "auto" : "visible";
+
       // Mappings header
-      const mappingsHeader = card.createDiv();
-      mappingsHeader.style.marginTop = "12px";
-      mappingsHeader.style.marginBottom = "4px";
+      const mappingsHeader = mappingsContainer.createDiv();
       mappingsHeader.style.display = "flex";
       mappingsHeader.style.justifyContent = "space-between";
+      mappingsHeader.style.marginBottom = "4px";
 
       const mappingsTitle = mappingsHeader.createEl("span", {
         text: mappings.length === 0
@@ -1225,7 +1260,7 @@ class PropMoveSettingTab extends PluginSettingTab {
 
       if (mappings.length > 0) {
         // Column headers
-        const colHeaders = card.createDiv();
+        const colHeaders = mappingsContainer.createDiv();
         colHeaders.style.display = "flex";
         colHeaders.style.gap = "8px";
         colHeaders.style.marginBottom = "4px";
@@ -1253,18 +1288,21 @@ class PropMoveSettingTab extends PluginSettingTab {
 
       // Mapping rows
       mappings.forEach((mapping, index) => {
-        const row = card.createDiv();
+        const row = mappingsContainer.createDiv();
         row.style.display = "flex";
         row.style.alignItems = "center";
         row.style.gap = "8px";
         row.style.marginBottom = "4px";
 
+        // Value input with autocomplete
         const valueInput = row.createEl("input", {
           type: "text",
           value: mapping.value || "",
-          placeholder: "task or *"
+          placeholder: "task or *",
+          attr: { list: valueDatalistId }
         });
-        valueInput.style.flex = "1";
+        valueInput.style.width = "30%";
+        valueInput.style.minWidth = "80px";
         valueInput.style.padding = "4px 8px";
         valueInput.style.fontSize = "13px";
         valueInput.style.background = "var(--background-primary)";
@@ -1272,6 +1310,28 @@ class PropMoveSettingTab extends PluginSettingTab {
         valueInput.style.borderRadius = "4px";
         valueInput.oninput = async () => {
           mapping.value = valueInput.value;
+          await this.plugin.saveSettings();
+        };
+
+        // Operator select
+        const operatorSelect = row.createEl("select");
+        operatorSelect.style.width = "90px";
+        operatorSelect.style.minWidth = "90px";
+        operatorSelect.style.padding = "4px";
+        operatorSelect.style.fontSize = "12px";
+        operatorSelect.style.background = "var(--background-primary)";
+        operatorSelect.style.border = "1px solid var(--background-modifier-border)";
+        operatorSelect.style.borderRadius = "4px";
+        const currentOp = mapping.operator || "equals";
+        for (const op of ["equals", "contains", "is empty", "is not empty"]) {
+          const opt = operatorSelect.createEl("option", {
+            text: op.replace(/-/g, " ").replace(/^\w/, c => c.toUpperCase()),
+            value: op.replace(/ /g, "-")
+          });
+          if (op.replace(/ /g, "-") === currentOp) opt.selected = true;
+        }
+        operatorSelect.onchange = async () => {
+          mapping.operator = operatorSelect.value;
           await this.plugin.saveSettings();
         };
 
@@ -1289,28 +1349,6 @@ class PropMoveSettingTab extends PluginSettingTab {
         folderInput.style.borderRadius = "4px";
         folderInput.oninput = async () => {
           mapping.folder = folderInput.value;
-          await this.plugin.saveSettings();
-        };
-
-        // Operator select
-        const operatorSelect = row.createEl("select");
-        operatorSelect.style.flex = "0";
-        operatorSelect.style.padding = "4px";
-        operatorSelect.style.fontSize = "12px";
-        operatorSelect.style.background = "var(--background-primary)";
-        operatorSelect.style.border = "1px solid var(--background-modifier-border)";
-        operatorSelect.style.borderRadius = "4px";
-        operatorSelect.style.minWidth = "80px";
-        const currentOp = mapping.operator || "equals";
-        for (const op of ["equals", "contains", "is empty", "is not empty"]) {
-          const opt = operatorSelect.createEl("option", {
-            text: op.replace(/-/g, " ").replace(/^\w/, c => c.toUpperCase()),
-            value: op.replace(/ /g, "-")
-          });
-          if (op.replace(/ /g, "-") === currentOp) opt.selected = true;
-        }
-        operatorSelect.onchange = async () => {
-          mapping.operator = operatorSelect.value;
           await this.plugin.saveSettings();
         };
 
