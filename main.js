@@ -795,13 +795,309 @@ module.exports = class PropMove extends Plugin {
 // Export for testing
 module.exports.stripWikiLink = stripWikiLink;
 
+/**
+ * Collect all unique frontmatter property keys from the vault
+ */
+function collectVaultPropertyKeys(app) {
+  let propKeys = [];
+  if (typeof app.metadataCache.getAllMetadataProperties === 'function') {
+    const vaultProps = app.metadataCache.getAllMetadataProperties();
+    propKeys = Object.keys(vaultProps).sort();
+  } else {
+    const seen = new Set();
+    for (const file of app.vault.getMarkdownFiles()) {
+      const cache = app.metadataCache.getFileCache(file);
+      if (cache && cache.frontmatter) {
+        for (const key of Object.keys(cache.frontmatter)) {
+          seen.add(key);
+        }
+      }
+    }
+    propKeys = Array.from(seen).sort();
+  }
+  return propKeys;
+}
+
+/**
+ * Collect all unique values for a given property key from the vault
+ */
+function collectVaultPropertyValues(app, propName) {
+  const values = new Set();
+  if (!propName) return [];
+  for (const file of app.vault.getMarkdownFiles()) {
+    const cache = app.metadataCache.getFileCache(file);
+    if (cache && cache.frontmatter && cache.frontmatter[propName] !== undefined) {
+      const raw = cache.frontmatter[propName];
+      const vals = Array.isArray(raw) ? raw : [raw];
+      for (const v of vals) {
+        const trimmed = String(v).trim();
+        if (trimmed.length > 0) {
+          values.add(trimmed);
+        }
+      }
+    }
+    // Fallback: read file directly if cache is empty
+    if (values.size === 0) {
+      try {
+        const content = app.vault.readCachedFile(file) || app.vault.readAsync(file);
+        if (content) {
+          const fmMatch = content.match(/^---\n([\s\S]*?)\n---/);
+          if (fmMatch) {
+            const frontmatter = fmMatch[1];
+            const lineMatch = frontmatter.match(new RegExp('^' + propName + ':\\s*(.+)$', 'm'));
+            if (lineMatch) {
+              const val = lineMatch[1].trim();
+              if (val) values.add(val);
+            }
+          }
+        }
+      } catch (e) {}
+    }
+  }
+  return Array.from(values).sort();
+}
+
+/**
+ * Collect all folder paths from the vault (excluding vault root)
+ */
+function collectVaultFolders(app) {
+  const folders = [];
+  const rootPath = app.vault.getRoot()?.path || '';
+  for (const item of app.vault.getAllLoadedFiles()) {
+    if (item instanceof TFolder && item.path !== rootPath && item.path !== '') {
+      folders.push(item.path);
+    }
+  }
+  return folders.sort();
+}
+
+/**
+ * PropMoveSuggestInput - Custom autocomplete input with scrollable dropdown.
+ * Replaces HTML <datalist> which cannot be constrained with max-height.
+ *
+ * Features:
+ * - Scrollable suggestion list with configurable max-height
+ * - Filters suggestions as user types
+ * - Arrow key navigation (up/down) + Enter to select
+ * - Escape to close
+ * - Click outside to close
+ * - Allows arbitrary typed values (not restricted to suggestions)
+ */
+/**
+ * PropMoveSuggestInput - Custom autocomplete input with scrollable dropdown.
+ * Replaces HTML <datalist> which cannot be constrained with max-height.
+ *
+ * Features:
+ * - Scrollable suggestion list attached to document.body (avoids parent overflow clipping)
+ * - Filters suggestions as user types
+ * - Arrow key navigation (up/down) + Enter to select
+ * - Escape to close
+ * - Click outside to close
+ * - Allows arbitrary typed values (not restricted to suggestions)
+ */
+/**
+ * Create a suggest input: text field + scrollable dropdown suggestions.
+ * - Text input allows arbitrary typed values (not restricted to suggestions).
+ * - Dropdown is attached to document.body to avoid parent overflow clipping.
+ * - Filters suggestions as user types.
+ * - Arrow key navigation (up/down) + Enter to select.
+ * - Escape to close. Click outside to close.
+ */
+function createSuggestInput(container, options) {
+  const wrapper = container.createDiv('suggest-input-wrapper');
+  wrapper.style.position = 'relative';
+  wrapper.style.width = options.wrapperWidth || '100%';
+  if (options.wrapperFlex !== null && options.wrapperFlex !== undefined) {
+    wrapper.style.flex = options.wrapperFlex;
+  }
+  if (options.wrapperMinWidth) {
+    wrapper.style.minWidth = options.wrapperMinWidth;
+  }
+
+  // Text input - user can type anything
+  const input = wrapper.createEl('input', { type: 'text' });
+  input.style.width = '100%';
+  input.style.boxSizing = 'border-box';
+  input.style.padding = '4px 8px';
+  input.style.fontSize = '13px';
+  input.style.background = 'var(--background-primary)';
+  input.style.border = '1px solid var(--background-modifier-border)';
+  input.style.borderRadius = '4px';
+  input.style.outline = 'none';
+
+  // Mutable suggestions ref so updateSuggestions can change what showDropdown sees
+  const suggestionsRef = { current: options.suggestions || [] };
+  const initialValue = options.initialValue || '';
+  input.value = initialValue;
+
+  // Dropdown list - attached to body to escape overflow:hidden parents
+  let dropdown = null;
+  let highlightedIndex = -1;
+
+  function showDropdown() {
+    if (dropdown) {
+      dropdown.remove();
+    }
+    highlightedIndex = -1;
+
+    // Filter suggestions based on current input
+    const filter = input.value.toLowerCase();
+    const filtered = suggestionsRef.current.filter(s => s.toLowerCase().includes(filter));
+    if (filtered.length === 0) return;
+
+    dropdown = document.body.createDiv('propmove-suggest-dropdown');
+    dropdown.style.position = 'absolute';
+    dropdown.style.zIndex = '10000';
+    dropdown.style.maxHeight = '200px';
+    dropdown.style.overflowY = 'auto';
+    dropdown.style.border = '1px solid var(--background-modifier-border)';
+    dropdown.style.borderRadius = '4px';
+    dropdown.style.background = 'var(--background-secondary)';
+    dropdown.style.boxShadow = '0 4px 12px rgba(0,0,0,0.3)';
+    dropdown.style.minWidth = '150px';
+
+    const rect = input.getBoundingClientRect();
+    dropdown.style.top = (rect.bottom + 2) + 'px';
+    dropdown.style.left = rect.left + 'px';
+    dropdown.style.width = rect.width + 'px';
+
+    for (const s of filtered) {
+      const item = dropdown.createDiv('propmove-suggest-item');
+      item.textContent = s;
+      item.style.padding = '6px 10px';
+      item.style.cursor = 'pointer';
+      item.style.fontSize = '13px';
+      item.onmouseover = () => {
+        highlightedIndex = [...dropdown.children].indexOf(item);
+        updateHighlight();
+      };
+      item.onclick = () => {
+        input.value = s;
+        dropdown.remove();
+        dropdown = null;
+        if (options.onInput) options.onInput(s);
+        if (options.onSelect) options.onSelect(s);
+      };
+    }
+
+    positionDropdown();
+  }
+
+  function positionDropdown() {
+    if (!dropdown) return;
+    const rect = input.getBoundingClientRect();
+    dropdown.style.top = (rect.bottom + 2) + 'px';
+    dropdown.style.left = rect.left + 'px';
+    dropdown.style.width = rect.width + 'px';
+  }
+
+  function hideDropdown() {
+    if (dropdown) {
+      dropdown.remove();
+      dropdown = null;
+    }
+    highlightedIndex = -1;
+  }
+
+  function updateHighlight() {
+    if (!dropdown) return;
+    const items = dropdown.children;
+    for (let i = 0; i < items.length; i++) {
+      if (i === highlightedIndex) {
+        items[i].style.background = 'var(--background-modifier-hover)';
+      } else {
+        items[i].style.background = '';
+      }
+    }
+  }
+
+  // Show dropdown on focus
+  input.onfocus = () => showDropdown();
+
+  // Filter on input
+  input.oninput = () => {
+    if (options.onInput) options.onInput(input.value);
+    showDropdown();
+  };
+
+  // Keyboard navigation
+  input.onkeydown = (e) => {
+    if (!dropdown) return;
+    const items = dropdown.children;
+    if (!items.length) return;
+
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      highlightedIndex = (highlightedIndex + 1) % items.length;
+      updateHighlight();
+      items[highlightedIndex].scrollIntoView({ block: 'nearest' });
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      highlightedIndex = highlightedIndex <= 0 ? items.length - 1 : highlightedIndex - 1;
+      updateHighlight();
+      items[highlightedIndex].scrollIntoView({ block: 'nearest' });
+    } else if (e.key === 'Enter') {
+      if (highlightedIndex >= 0 && items[highlightedIndex]) {
+        e.preventDefault();
+        const val = items[highlightedIndex].textContent;
+        input.value = val;
+        hideDropdown();
+        if (options.onSelect) options.onSelect(val);
+      }
+    } else if (e.key === 'Escape') {
+      hideDropdown();
+    }
+  };
+
+  // Click outside to close
+  const clickOutside = (e) => {
+    if (!wrapper.contains(e.target)) {
+      hideDropdown();
+    }
+  };
+  document.addEventListener('click', clickOutside);
+
+  // Reposition on scroll/resize
+  window.addEventListener('scroll', positionDropdown, true);
+  window.addEventListener('resize', positionDropdown);
+
+  return {
+    input,
+    wrapper,
+    updateSuggestions: function(newSuggestions) {
+      suggestionsRef.current = newSuggestions || [];
+      // Re-show dropdown if open
+      if (dropdown) showDropdown();
+    },
+    destroy: function() {
+      document.removeEventListener('click', clickOutside);
+      window.removeEventListener('scroll', positionDropdown, true);
+      window.removeEventListener('resize', positionDropdown);
+      hideDropdown();
+      if (wrapper && wrapper.parentNode) {
+        wrapper.parentNode.removeChild(wrapper);
+      }
+    },
+    getValue: function() {
+      return input.value;
+    }
+  };
+}
+
+
 class PropMoveSettingTab extends PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
     this.plugin = plugin;
+    this.suggestInputs = [];
   }
 
   display() {
+    // Clean up old suggest inputs to prevent memory leaks
+    for (const input of this.suggestInputs) {
+      input.destroy();
+    }
+    this.suggestInputs = [];
     const { containerEl } = this;
     containerEl.empty();
 
@@ -1128,49 +1424,38 @@ class PropMoveSettingTab extends PluginSettingTab {
       nameLabel.style.fontSize = "13px";
       nameLabel.style.fontWeight = "500";
 
-      // Autocomplete datalist from vault properties
-      const datalistId = `propmove-datalist-${groupIndex}`;
-      const datalist = nameRow.createEl("datalist", {
-        attr: { id: datalistId }
-      });
-      // Try native API first (Obsidian 1.7+), fallback to manual scan
-      let propKeys = [];
-      if (typeof this.app.metadataCache.getAllMetadataProperties === 'function') {
-        const vaultProps = this.app.metadataCache.getAllMetadataProperties();
-        propKeys = Object.keys(vaultProps).sort();
-      } else {
-        // Manual fallback: scan all markdown files for frontmatter keys
-        const seen = new Set();
-        for (const file of this.app.vault.getMarkdownFiles()) {
-          const cache = this.app.metadataCache.getFileCache(file);
-          if (cache && cache.frontmatter) {
-            for (const key of Object.keys(cache.frontmatter)) {
-              seen.add(key);
-            }
+      // Declare valueSuggestInputs array here so name input callbacks can reference it
+      const valueSuggestInputs = [];
+
+      // Property name suggest input with scrollable dropdown
+      const nameSuggest = createSuggestInput(nameRow, {
+        suggestions: collectVaultPropertyKeys(this.app),
+        placeholder: "type",
+        initialValue: group.name || "",
+        onInput: async (val) => {
+          group.name = val.trim();
+          await this.plugin.saveSettings();
+          // Update value suggestions dynamically when property name changes
+          const propName = group.name || "";
+          const vals = collectVaultPropertyValues(this.app, propName);
+          vals.unshift("*");
+          for (const vSuggest of valueSuggestInputs) {
+            vSuggest.updateSuggestions(vals);
+          }
+        },
+        onSelect: async (val) => {
+          group.name = val.trim();
+          await this.plugin.saveSettings();
+          // Update value suggestions dynamically when property name is selected
+          const propName = group.name || "";
+          const vals = collectVaultPropertyValues(this.app, propName);
+          vals.unshift("*");
+          for (const vSuggest of valueSuggestInputs) {
+            vSuggest.updateSuggestions(vals);
           }
         }
-        propKeys = Array.from(seen).sort();
-      }
-      for (const key of propKeys) {
-        datalist.createEl("option", { attr: { value: key } });
-      }
-
-      const nameInput = nameRow.createEl("input", {
-        type: "text",
-        value: group.name || "",
-        placeholder: "type",
-        attr: { list: datalistId }
       });
-      nameInput.style.flex = "1";
-      nameInput.style.padding = "4px 8px";
-      nameInput.style.fontSize = "13px";
-      nameInput.style.background = "var(--background-primary)";
-      nameInput.style.border = "1px solid var(--background-modifier-border)";
-      nameInput.style.borderRadius = "4px";
-      nameInput.oninput = async () => {
-        group.name = nameInput.value.trim();
-        await this.plugin.saveSettings();
-      };
+      this.suggestInputs.push(nameSuggest);
 
       // Auto-update toggle
       const toggleRow = card.createDiv();
@@ -1196,47 +1481,12 @@ class PropMoveSettingTab extends PluginSettingTab {
 
       const mappings = Array.isArray(group.mappings) ? group.mappings : [];
 
-      // Folder autocomplete datalist (shared across all mappings in this card)
-      const folderDatalistId = `propmove-folders-${groupIndex}`;
-      const folderDatalist = card.createEl("datalist", {
-        attr: { id: folderDatalistId }
-      });
-      folderDatalist.style.display = "none"; // hidden, datalists don't render visually
-      for (const folder of this.app.vault.getAllLoadedFiles()) {
-        if (folder instanceof TFolder) {
-          folderDatalist.createEl("option", { attr: { value: folder.path } });
-        }
-      }
+      // Collect initial value suggestions from vault for current property
+      const initialVals = collectVaultPropertyValues(this.app, group.name || "");
+      initialVals.unshift("*");
 
-      // Value autocomplete datalist — scan vault for existing values of this property
-      const valueDatalistId = `propmove-values-${groupIndex}`;
-      const valueDatalist = card.createEl("datalist", {
-        attr: { id: valueDatalistId }
-      });
-      valueDatalist.style.display = "none";
-      // Collect existing values for the current property name
-      const propName = group.name || "";
-      const existingValues = new Set();
-      if (propName) {
-        for (const file of this.app.vault.getMarkdownFiles()) {
-          const cache = this.app.metadataCache.getFileCache(file);
-          if (cache && cache.frontmatter && cache.frontmatter[propName] !== undefined) {
-            const raw = cache.frontmatter[propName];
-            const vals = Array.isArray(raw) ? raw : [raw];
-            for (const v of vals) {
-              const trimmed = String(v).trim();
-              if (trimmed.length > 0) {
-                existingValues.add(trimmed);
-              }
-            }
-          }
-        }
-      }
-      for (const val of existingValues) {
-        valueDatalist.createEl("option", { attr: { value: val } });
-      }
-      // Always include wildcard option
-      valueDatalist.createEl("option", { attr: { value: "*" } });
+      // Collect folder suggestions
+      const folderSuggestions = collectVaultFolders(this.app);
 
       // Mappings section container (scrollable to prevent overflow)
       const mappingsContainer = card.createDiv();
@@ -1287,6 +1537,7 @@ class PropMoveSettingTab extends PluginSettingTab {
       }
 
       // Mapping rows
+      // valueSuggestInputs already declared above for name input callbacks
       mappings.forEach((mapping, index) => {
         const row = mappingsContainer.createDiv();
         row.style.display = "flex";
@@ -1294,24 +1545,24 @@ class PropMoveSettingTab extends PluginSettingTab {
         row.style.gap = "8px";
         row.style.marginBottom = "4px";
 
-        // Value input with autocomplete
-        const valueInput = row.createEl("input", {
-          type: "text",
-          value: mapping.value || "",
+        // Value input with autocomplete dropdown
+        const valueSuggest = createSuggestInput(row, {
+          suggestions: initialVals,
           placeholder: "task or *",
-          attr: { list: valueDatalistId }
+          initialValue: mapping.value || "",
+          wrapperWidth: "30%",
+          wrapperMinWidth: "80px",
+          onInput: async (val) => {
+            mapping.value = val;
+            await this.plugin.saveSettings();
+          },
+          onSelect: async (val) => {
+            mapping.value = val;
+            await this.plugin.saveSettings();
+          }
         });
-        valueInput.style.width = "30%";
-        valueInput.style.minWidth = "80px";
-        valueInput.style.padding = "4px 8px";
-        valueInput.style.fontSize = "13px";
-        valueInput.style.background = "var(--background-primary)";
-        valueInput.style.border = "1px solid var(--background-modifier-border)";
-        valueInput.style.borderRadius = "4px";
-        valueInput.oninput = async () => {
-          mapping.value = valueInput.value;
-          await this.plugin.saveSettings();
-        };
+        valueSuggestInputs.push(valueSuggest);
+        this.suggestInputs.push(valueSuggest);
 
         // Operator select
         const operatorSelect = row.createEl("select");
@@ -1335,22 +1586,22 @@ class PropMoveSettingTab extends PluginSettingTab {
           await this.plugin.saveSettings();
         };
 
-        const folderInput = row.createEl("input", {
-          type: "text",
-          value: mapping.folder || "",
+        // Folder input with autocomplete dropdown
+        const folderSuggest = createSuggestInput(row, {
+          suggestions: folderSuggestions,
           placeholder: "Projects/Tasks",
-          attr: { list: folderDatalistId }
+          initialValue: mapping.folder || "",
+          wrapperFlex: "1",
+          onInput: async (val) => {
+            mapping.folder = val;
+            await this.plugin.saveSettings();
+          },
+          onSelect: async (val) => {
+            mapping.folder = val;
+            await this.plugin.saveSettings();
+          }
         });
-        folderInput.style.flex = "1";
-        folderInput.style.padding = "4px 8px";
-        folderInput.style.fontSize = "13px";
-        folderInput.style.background = "var(--background-primary)";
-        folderInput.style.border = "1px solid var(--background-modifier-border)";
-        folderInput.style.borderRadius = "4px";
-        folderInput.oninput = async () => {
-          mapping.folder = folderInput.value;
-          await this.plugin.saveSettings();
-        };
+        this.suggestInputs.push(folderSuggest);
 
         const mapTrash = row.createEl("button");
         mapTrash.innerHTML = "<svg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><line x1='18' y1='6' x2='6' y2='18'></line><line x1='6' y1='6' x2='18' y2='18'></line></svg>";
