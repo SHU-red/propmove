@@ -829,35 +829,41 @@ module.exports = class PropMove extends Plugin {
    * Shared between the settings tab and the ribbon icon modal.
    */
   renderManualTriggers(containerEl) {
+    // Row 1: Process all files - Dry Run + Execute
     new Setting(containerEl)
       .setName("Process all files")
       .setDesc("Move all files based on current property rules")
       .addButton((button) =>
         button
-          .setButtonText("Process all files now")
+          .setButtonText("Dry Run")
+          .onClick(async () => {
+            await this.previewMoves();
+          })
+      )
+      .addButton((button) =>
+        button
+          .setButtonText("Execute")
           .setCta()
           .onClick(async () => {
             await this.processAllFiles();
           })
       );
 
-    new Setting(containerEl)
-      .setName("Preview moves")
-      .setDesc("Show what moves would be made without actually moving files")
-      .addButton((button) =>
-        button
-          .setButtonText("Preview moves (read-only)")
-          .onClick(async () => {
-            await this.previewMoves();
-          })
-      );
-
+    // Row 2: Process folder - Dry Run + Execute
     new Setting(containerEl)
       .setName("Process folder")
       .setDesc("Select a specific folder to process files in")
       .addButton((button) =>
         button
-          .setButtonText("Process folder...")
+          .setButtonText("Dry Run")
+          .onClick(() => {
+            this.promptFolderAndPreview();
+          })
+      )
+      .addButton((button) =>
+        button
+          .setButtonText("Execute")
+          .setCta()
           .onClick(() => {
             this.promptFolderAndProcess();
           })
