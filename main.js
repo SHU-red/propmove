@@ -24,7 +24,10 @@ const DEFAULT_SETTINGS = {
   maxFilesPerBatch: 0,
   caseInsensitiveMatching: false,
   autoCreateFolders: true,
-  showRibbonIcon: true
+  showRibbonIcon: true,
+  undoCheckpoints: [],
+  undoMaxCheckpoints: 10,
+  undoAutoCooldownMs: 2000
 };
 
 /**
@@ -39,7 +42,7 @@ class FileProcessor {
 
   /**
    * Determines the target folder for a file based on property mappings
-   * @returns {string|null} The target folder path or null if no match found
+   * @returns {{targetFolder: string, ruleName: string, ruleValue: string}|null}
    */
   findTargetFolder(frontmatter) {
     const groups = Array.isArray(this.settings.properties) ? this.settings.properties : [];
@@ -63,7 +66,13 @@ class FileProcessor {
 
       if (mapping) {
         const targetFolder = String(mapping.folder || "").trim();
-        if (targetFolder) return targetFolder;
+        if (targetFolder) {
+          return {
+            targetFolder,
+            ruleName: propName,
+            ruleValue: normalizedValues[0]
+          };
+        }
       }
     }
 
@@ -168,14 +177,14 @@ class FileProcessor {
       return null;
     }
 
-    const targetFolder = this.findTargetFolder(frontmatter);
-    if (!targetFolder) {
+    const targetResult = this.findTargetFolder(frontmatter);
+    if (!targetResult) {
       this.logger.debug(`[PREVIEW] No matching rule for ${file.path}`);
       return null;
     }
 
     // Interpolate variables in the target folder
-    const interpolatedFolder = this.interpolateVariables(targetFolder, frontmatter);
+    const interpolatedFolder = this.interpolateVariables(targetResult.targetFolder, frontmatter);
     const normalizedFolder = normalizePath(interpolatedFolder);
     const targetPath = normalizePath(`${normalizedFolder}/${file.name}`);
 
@@ -191,7 +200,7 @@ class FileProcessor {
         action: "skip",
         reason: "folder_not_exist_no_create",
         targetFolder: normalizedFolder,
-        template: targetFolder,
+        template: targetResult.targetFolder,
         interpolated: interpolatedFolder
       };
     }
@@ -205,15 +214,17 @@ class FileProcessor {
           targetPath: targetPath,
           targetFolder: normalizedFolder,
           fileName: file.name,
-          template: targetFolder,
-          interpolated: interpolatedFolder
+          template: targetResult.targetFolder,
+          interpolated: interpolatedFolder,
+          ruleName: targetResult.ruleName,
+          ruleValue: targetResult.ruleValue
         };
       } else {
         return {
           action: "skip",
           reason: "target_exists",
           targetPath: targetPath,
-          template: targetFolder,
+          template: targetResult.targetFolder,
           interpolated: interpolatedFolder
         };
       }
@@ -224,8 +235,10 @@ class FileProcessor {
       currentPath: file.path,
       targetPath: targetPath,
       targetFolder: normalizedFolder,
-      template: targetFolder,
-      interpolated: interpolatedFolder
+      template: targetResult.targetFolder,
+      interpolated: interpolatedFolder,
+      ruleName: targetResult.ruleName,
+      ruleValue: targetResult.ruleValue
     };
   }
 
@@ -424,6 +437,8 @@ module.exports = class PropMove extends Plugin {
     this.migrateSettings();
     this.pending = new Map();
     this.movingPaths = new Set();
+    this.autoBatchQueue = new Map();
+    this.autoBatchTimer = null;
     this.isStartup = true;
 
     // Initialize logger and file processor
@@ -568,15 +583,17 @@ module.exports = class PropMove extends Plugin {
   }
 
   onunload() {
-    for (const timeoutId of this.pending.values()) {
-      clearTimeout(timeoutId);
+    if (this.autoBatchTimer) {
+      clearTimeout(this.autoBatchTimer);
+      this.autoBatchTimer = null;
     }
-    this.pending.clear();
+    this.autoBatchQueue.clear();
     this.movingPaths.clear();
   }
 
   /**
-   * Queue a file for processing with debouncing
+   * Queue a file for processing with debouncing and auto-batching.
+   * Auto-moves are batched into a single checkpoint within the cooldown window.
    */
   queueProcess(file) {
     if (!this.fileProcessor.isEligibleForProcessing(file)) {
@@ -587,17 +604,25 @@ module.exports = class PropMove extends Plugin {
       return;
     }
 
-    const existingTimeout = this.pending.get(file.path);
-    if (existingTimeout) {
-      clearTimeout(existingTimeout);
+    // Add to auto-batch queue (deduplicate by path)
+    if (!this.autoBatchQueue.has(file.path)) {
+      this.autoBatchQueue.set(file.path, file);
     }
 
-    const timeoutId = setTimeout(() => {
-      this.pending.delete(file.path);
-      this.processFile(file.path);
-    }, this.settings.processingDelay);
+    // Reset cooldown timer
+    if (this.autoBatchTimer) {
+      clearTimeout(this.autoBatchTimer);
+    }
 
-    this.pending.set(file.path, timeoutId);
+    this.autoBatchTimer = setTimeout(async () => {
+      const batchFiles = Array.from(this.autoBatchQueue.values());
+      this.autoBatchQueue.clear();
+      this.autoBatchTimer = null;
+
+      if (batchFiles.length > 0) {
+        await this.processFiles(batchFiles, "auto");
+      }
+    }, this.settings.undoAutoCooldownMs);
   }
 
   /**
@@ -635,12 +660,13 @@ module.exports = class PropMove extends Plugin {
    * Core file processing loop with chunking for performance.
    * @param {TFile[]} files - Files to process
    */
-  async processFiles(files) {
+  async processFiles(files, source) {
     this.logger.debug("Starting manual processing of all files");
 
     let processedCount = 0;
     let movedCount = 0;
     let skippedCount = 0;
+    const successfulMoves = [];
     const maxFiles = this.settings.maxFilesPerBatch > 0 ? this.settings.maxFilesPerBatch : files.length;
 
     for (const file of files) {
@@ -662,9 +688,17 @@ module.exports = class PropMove extends Plugin {
 
       try {
         this.logger.debug(`Processing file: ${file.path}`);
-        const result = await this.processFile(file.path);
+        const result = await this.processFile(file.path, source);
         if (result && result.success) {
           movedCount++;
+          if (result.from && result.to) {
+            successfulMoves.push({
+              file: result.file,
+              from: result.from,
+              to: result.to,
+              rule: result.rule
+            });
+          }
         } else {
           skippedCount++;
         }
@@ -673,6 +707,14 @@ module.exports = class PropMove extends Plugin {
         this.logger.error(`Error processing file ${file.path}: ${error.message}`);
         skippedCount++;
       }
+    }
+
+    // Create checkpoint if there were successful moves
+    if (successfulMoves.length > 0) {
+      this.logger.info(`[UNDO] Creating checkpoint with ${successfulMoves.length} moves (source: ${source || "manual"})`);
+      await this.addCheckpoint(successfulMoves, source || "manual");
+    } else if (movedCount > 0) {
+      this.logger.warn(`[UNDO] movedCount=${movedCount} but successfulMoves is empty - checkpoint NOT created`);
     }
 
     const message = `PropMove: Processed ${processedCount} files, moved ${movedCount}, skipped ${skippedCount}`;
@@ -899,7 +941,7 @@ module.exports = class PropMove extends Plugin {
   /**
    * Process a single file and move it if applicable
    */
-  async processFile(filePath) {
+  async processFile(filePath, source) {
     const file = this.app.vault.getAbstractFileByPath(filePath);
     if (!this.fileProcessor.isEligibleForProcessing(file)) {
       return null;
@@ -912,15 +954,17 @@ module.exports = class PropMove extends Plugin {
       return null;
     }
 
-    const targetFolder = this.fileProcessor.findTargetFolder(frontmatter);
-    if (!targetFolder) {
+    const targetResult = this.fileProcessor.findTargetFolder(frontmatter);
+    if (!targetResult) {
       return null;
     }
 
+    const originalPath = file.path;
+
     try {
       this.movingPaths.add(file.path);
-      const result = await this.fileProcessor.moveFile(file, targetFolder);
-      
+      const result = await this.fileProcessor.moveFile(file, targetResult.targetFolder);
+
       // Notify user of specific failures
       if (!result.success && result.message) {
         if (result.message.includes("folder does not exist")) {
@@ -929,14 +973,214 @@ module.exports = class PropMove extends Plugin {
           new Notice(`PropMove: Failed to move ${file.name}`);
         }
       }
-      
-      return result;
+
+      // Track successful moves for undo
+      if (result && result.success && (result.action === "move" || result.action === "move_with_suffix")) {
+        return {
+          success: true,
+          file: file.name,
+          from: originalPath,
+          to: result.path,
+          rule: `${targetResult.ruleName}=${targetResult.ruleValue}`,
+          source: source || "auto"
+        };
+      }
+
+      return { success: false };
     } catch (error) {
       this.logger.error(`Failed to move ${file.name}: ${error.message}`);
       new Notice(`PropMove: Failed to move ${file.name}`);
       return { success: false, error: error.message };
     } finally {
       this.movingPaths.delete(file.path);
+    }
+  }
+
+  /**
+   * Add a checkpoint to the undo history.
+   * Uses a ring buffer with max size from settings.
+   */
+  async addCheckpoint(moves, source) {
+    if (!Array.isArray(moves) || moves.length === 0) {
+      return;
+    }
+
+    const checkpoints = this.settings.undoCheckpoints || [];
+    const maxCheckpoints = this.settings.undoMaxCheckpoints;
+
+    const checkpoint = {
+      id: Date.now(),
+      timestamp: new Date().toISOString(),
+      source: source || "auto",
+      moveCount: moves.length,
+      moves: moves
+    };
+
+    checkpoints.push(checkpoint);
+
+    // Enforce ring buffer limit (0 or negative = unlimited)
+    if (maxCheckpoints && maxCheckpoints > 0) {
+      while (checkpoints.length > maxCheckpoints) {
+        checkpoints.shift();
+      }
+    }
+
+    this.settings.undoCheckpoints = checkpoints;
+    await this.saveSettings();
+    this.logger.info(`[CHECKPOINT] ${moves.length} moves saved (${source})`);
+
+    // Refresh settings tab if currently open
+    if (this.app.setting && this.app.setting.activeTab instanceof PropMoveSettingTab) {
+      this.app.setting.activeTab.display();
+    }
+  }
+
+  /**
+   * Preview what would happen if we revert to a specific checkpoint.
+   * Returns an array of revert actions with status.
+   */
+  previewRevert(checkpointIndex) {
+    const checkpoints = this.settings.undoCheckpoints || [];
+    if (checkpointIndex < 0 || checkpointIndex >= checkpoints.length) {
+      return [];
+    }
+
+    // Collect all moves from checkpoints AFTER the target checkpoint
+    // Revert moves from the target checkpoint onwards (inclusive)
+    const movesToRevert = [];
+    for (let j = checkpointIndex; j < checkpoints.length; j++) {
+      const cp = checkpoints[j];
+      if (cp && cp.moves) {
+        movesToRevert.push(...cp.moves);
+      }
+    }
+
+    // Reverse the moves list (undo in reverse order)
+    movesToRevert.reverse();
+
+    const preview = [];
+    for (const move of movesToRevert) {
+      const currentFile = this.app.vault.getAbstractFileByPath(move.to);
+      const targetFolderExists = this.app.vault.getAbstractFileByPath(
+        move.from.substring(0, move.from.lastIndexOf('/'))
+      ) instanceof TFolder;
+
+      if (!currentFile) {
+        preview.push({
+          ...move,
+          status: "file_missing",
+          message: "File not found at current location"
+        });
+      } else if (!targetFolderExists) {
+        preview.push({
+          ...move,
+          status: "folder_missing",
+          message: "Original folder would be recreated"
+        });
+      } else {
+        preview.push({
+          ...move,
+          status: "ready",
+          message: "Ready to revert"
+        });
+      }
+    }
+
+    return preview;
+  }
+
+  /**
+   * Execute revert to a specific checkpoint.
+   * Reverts all moves made after that checkpoint.
+   */
+  async executeRevert(checkpointIndex) {
+    const preview = this.previewRevert(checkpointIndex);
+
+    if (preview.length === 0) {
+      new Notice("PropMove: No moves to revert");
+      return;
+    }
+
+    let reverted = 0;
+    let skipped = 0;
+    let errors = 0;
+
+    for (const item of preview) {
+      try {
+        // Ensure target folder exists
+        const targetFolder = item.from.substring(0, item.from.lastIndexOf('/'));
+        await this.fileProcessor.ensureFolder(targetFolder, true);
+
+        const currentFile = this.app.vault.getAbstractFileByPath(item.to);
+        if (!currentFile) {
+          this.logger.debug(`[REVERT] Skipping - file missing: ${item.to}`);
+          skipped++;
+          continue;
+        }
+
+        await this.app.vault.rename(currentFile, item.from);
+        this.logger.debug(`[REVERT] ${item.to} -> ${item.from}`);
+        reverted++;
+      } catch (error) {
+        this.logger.error(`[REVERT] Failed: ${error.message}`);
+        errors++;
+      }
+    }
+
+    // Remove all checkpoints from the reverted range (inclusive)
+    const checkpoints = this.settings.undoCheckpoints || [];
+    this.settings.undoCheckpoints = checkpoints.slice(0, checkpointIndex);
+    await this.saveSettings();
+
+    new Notice(`PropMove Revert: ${reverted} reverted, ${skipped} skipped, ${errors} errors`);
+
+    // Refresh settings tab if currently open
+    if (this.app.setting && this.app.setting.activeTab instanceof PropMoveSettingTab) {
+      this.app.setting.activeTab.display();
+    }
+  }
+
+  /**
+   * Clear all undo checkpoints.
+   */
+  clearCheckpoints() {
+    this.settings.undoCheckpoints = [];
+    this.saveSettings();
+    this.logger.info("[CHECKPOINT] All checkpoints cleared");
+    // Refresh settings tab if currently open
+    if (this.app.setting && this.app.setting.activeTab instanceof PropMoveSettingTab) {
+      this.app.setting.activeTab.display();
+    }
+  }
+
+  /**
+   * Prune checkpoints to match the configured maximum.
+   * Called when the user reduces the max checkpoint limit.
+   * Keeps the most recent checkpoints (end of array), removes oldest (start).
+   */
+  async pruneCheckpoints() {
+    const checkpoints = this.settings.undoCheckpoints || [];
+    const maxCheckpoints = this.settings.undoMaxCheckpoints || 10;
+
+    if (maxCheckpoints <= 0) {
+      // Unlimited - nothing to prune
+      this.logger.debug("[CHECKPOINT] Max checkpoints set to unlimited, skipping prune");
+      return;
+    }
+
+    if (checkpoints.length <= maxCheckpoints) {
+      // Already within limit
+      return;
+    }
+
+    const removed = checkpoints.length - maxCheckpoints;
+    this.settings.undoCheckpoints = checkpoints.slice(-maxCheckpoints);
+    await this.saveSettings();
+    this.logger.info(`[CHECKPOINT] Pruned ${removed} old checkpoint(s) to match new limit of ${maxCheckpoints}`);
+
+    // Refresh settings tab if currently open
+    if (this.app.setting && this.app.setting.activeTab instanceof PropMoveSettingTab) {
+      this.app.setting.activeTab.display();
     }
   }
 
@@ -987,7 +1231,11 @@ module.exports = class PropMove extends Plugin {
       "processingDelay",
       "maxFilesPerBatch",
       "caseInsensitiveMatching",
-      "autoCreateFolders"
+      "autoCreateFolders",
+      "showRibbonIcon",
+      "undoCheckpoints",
+      "undoMaxCheckpoints",
+      "undoAutoCooldownMs"
     ];
 
     newSettings.forEach(setting => {
@@ -1354,16 +1602,14 @@ class PropMoveSettingTab extends PluginSettingTab {
       );
 
     // Manual Triggers section (always visible, right at the top)
-    containerEl.createEl("hr");
-    containerEl.createEl("h3", { text: "Manual Triggers" });
+    this.createSectionHeader(containerEl, "Manual Triggers");
 
     // Render shared manual trigger buttons
     this.plugin.renderManualTriggers(containerEl);
 
     // Automatic Triggers section (hidden when manual trigger only is enabled)
     if (!this.plugin.settings.manualTriggerOnly) {
-      containerEl.createEl("hr");
-      containerEl.createEl("h3", { text: "Automatic Triggers" });
+      this.createSectionHeader(containerEl, "Automatic Triggers");
 
       containerEl.createEl("p", {
         text: "Configure when files should be automatically moved based on property changes.",
@@ -1404,8 +1650,7 @@ class PropMoveSettingTab extends PluginSettingTab {
       });
     }
 
-    containerEl.createEl("hr");
-    containerEl.createEl("h3", { text: "Move Behavior" });
+    this.createSectionHeader(containerEl, "Move Behavior");
 
     // Auto-append suffix setting
     new Setting(containerEl)
@@ -1452,8 +1697,7 @@ class PropMoveSettingTab extends PluginSettingTab {
           })
       );
 
-    containerEl.createEl("hr");
-    containerEl.createEl("h3", { text: "Ribbon Icon" });
+    this.createSectionHeader(containerEl, "Ribbon Icon");
 
     // Show ribbon icon toggle (dedicated section)
     new Setting(containerEl)
@@ -1469,8 +1713,7 @@ class PropMoveSettingTab extends PluginSettingTab {
           })
       );
 
-    containerEl.createEl("hr");
-    containerEl.createEl("h3", { text: "Performance Settings" });
+    this.createSectionHeader(containerEl, "Performance Settings");
 
     new Setting(containerEl)
       .setName("Processing delay (ms)")
@@ -1513,8 +1756,7 @@ class PropMoveSettingTab extends PluginSettingTab {
           })
       );
 
-    containerEl.createEl("hr");
-    containerEl.createEl("h3", { text: "Ignore Folders" });
+    this.createSectionHeader(containerEl, "Ignore Folders");
 
     containerEl.createEl("p", {
       text: "Add folders to exclude files from being moved. Files in these folders will be ignored even if they match a property mapping (e.g., template folders)."
@@ -1570,8 +1812,7 @@ class PropMoveSettingTab extends PluginSettingTab {
         });
     });
 
-    containerEl.createEl("hr");
-    containerEl.createEl("h3", { text: "Mappings" });
+    this.createSectionHeader(containerEl, "Mappings");
 
     containerEl.createEl("p", {
       text: "Use {propertyName} to create dynamic paths based on frontmatter values."
@@ -1889,8 +2130,322 @@ class PropMoveSettingTab extends PluginSettingTab {
           this.display();
         });
     });
+
+    containerEl.createEl("hr");
+    this.renderHistorySection(containerEl);
   }
 
+  /**
+   * Create a styled section header with consistent visual weight.
+   */
+  createSectionHeader(containerEl, text) {
+    const hr = containerEl.createEl("hr");
+    const h3 = containerEl.createEl("h3", { text });
+    h3.style.fontSize = "16px";
+    h3.style.fontWeight = "700";
+    h3.style.marginTop = "24px";
+    h3.style.marginBottom = "12px";
+    h3.style.color = "var(--text-normal)";
+    h3.style.letterSpacing = "-0.01em";
+  }
+
+  /**
+   * Format an ISO timestamp into a human-readable relative string.
+   */
+  formatTimestamp(isoString) {
+    const date = new Date(isoString);
+    const now = new Date();
+    const diffMs = now - date;
+    const diffMin = Math.floor(diffMs / 60000);
+    const diffHr = Math.floor(diffMs / 3600000);
+    const diffDay = Math.floor(diffMs / 86400000);
+
+    if (diffMin < 1) return "just now";
+    if (diffMin < 60) return `${diffMin}m ago`;
+    if (diffHr < 24) return `${diffHr}h ago`;
+    if (diffDay < 7) return `${diffDay}d ago`;
+
+    return date.toLocaleDateString(undefined, {
+      year: 'numeric', month: 'short', day: 'numeric'
+    });
+  }
+
+  /**
+   * Render the history section in settings.
+   * Each checkpoint is a card matching the mapping card design.
+   */
+  renderHistorySection(containerEl) {
+    const checkpoints = this.plugin.settings.undoCheckpoints || [];
+
+    // Section header
+    const h3 = containerEl.createEl("h3", { text: "Move History" });
+    h3.style.fontSize = "16px";
+    h3.style.fontWeight = "700";
+    h3.style.marginTop = "24px";
+    h3.style.marginBottom = "12px";
+    h3.style.color = "var(--text-normal)";
+    h3.style.letterSpacing = "-0.01em";
+
+    if (checkpoints.length === 0) {
+      // Max checkpoints setting even when empty
+      const emptyRow = containerEl.createDiv();
+      emptyRow.style.marginBottom = "12px";
+      emptyRow.style.display = "flex";
+      emptyRow.style.justifyContent = "flex-start";
+      emptyRow.style.alignItems = "center";
+      const emptyMaxContainer = emptyRow.createDiv();
+      emptyMaxContainer.style.display = "flex";
+      emptyMaxContainer.style.alignItems = "center";
+      emptyMaxContainer.style.gap = "8px";
+      const emptyMaxLabel = emptyMaxContainer.createEl("label");
+      emptyMaxLabel.textContent = "Max checkpoints:";
+      emptyMaxLabel.style.fontSize = "12px";
+      emptyMaxLabel.style.color = "var(--text-muted)";
+      emptyMaxLabel.style.fontWeight = "500";
+      const emptyMaxInput = emptyMaxContainer.createEl("input", { type: "number" });
+      emptyMaxInput.value = this.plugin.settings.undoMaxCheckpoints || 10;
+      emptyMaxInput.min = "0";
+      emptyMaxInput.max = "1000";
+      emptyMaxInput.style.width = "60px";
+      emptyMaxInput.style.fontSize = "12px";
+      emptyMaxInput.style.padding = "2px 4px";
+      emptyMaxInput.title = "Maximum number of checkpoints to store. Set to 0 for unlimited.";
+      emptyMaxInput.onchange = async () => {
+        const val = parseInt(emptyMaxInput.value, 10);
+        if (isNaN(val) || val < 0) {
+          emptyMaxInput.value = this.plugin.settings.undoMaxCheckpoints || 10;
+          new Notice("PropMove: Invalid value. Using current limit.");
+          return;
+        }
+        this.plugin.settings.undoMaxCheckpoints = val;
+        await this.plugin.saveSettings();
+        new Notice(`PropMove: Max checkpoints set to ${val === 0 ? 'unlimited' : val}`);
+      };
+
+      containerEl.createEl("p", {
+        text: "No move history yet. Files moved by PropMove will appear here.",
+        cls: "setting-item-description"
+      });
+      return;
+    }
+
+    // Clear history button row + max checkpoints setting
+    const clearRow = containerEl.createDiv();
+    clearRow.style.marginBottom = "12px";
+    clearRow.style.display = "flex";
+    clearRow.style.justifyContent = "space-between";
+    clearRow.style.alignItems = "center";
+
+    // Max checkpoints setting (left side)
+    const maxSettingContainer = clearRow.createDiv();
+    maxSettingContainer.style.display = "flex";
+    maxSettingContainer.style.alignItems = "center";
+    maxSettingContainer.style.gap = "8px";
+    const maxLabel = maxSettingContainer.createEl("label");
+    maxLabel.textContent = "Max checkpoints:";
+    maxLabel.style.fontSize = "12px";
+    maxLabel.style.color = "var(--text-muted)";
+    maxLabel.style.fontWeight = "500";
+    const maxInput = maxSettingContainer.createEl("input", { type: "number" });
+    maxInput.value = this.plugin.settings.undoMaxCheckpoints || 10;
+    maxInput.min = "0";
+    maxInput.max = "1000";
+    maxInput.style.width = "60px";
+    maxInput.style.fontSize = "12px";
+    maxInput.style.padding = "2px 4px";
+    maxInput.title = "Maximum number of checkpoints to store. Set to 0 for unlimited.";
+    maxInput.onchange = async () => {
+      const val = parseInt(maxInput.value, 10);
+      if (isNaN(val) || val < 0) {
+        maxInput.value = this.plugin.settings.undoMaxCheckpoints || 10;
+        new Notice("PropMove: Invalid value. Using current limit.");
+        return;
+      }
+      this.plugin.settings.undoMaxCheckpoints = val;
+      await this.plugin.saveSettings();
+      // Prune if necessary
+      await this.plugin.pruneCheckpoints();
+      new Notice(`PropMove: Max checkpoints set to ${val === 0 ? 'unlimited' : val}`);
+      this.display();
+    };
+
+    // Clear history button (right side)
+    const clearBtn = clearRow.createEl("button");
+    clearBtn.textContent = "Clear history";
+    clearBtn.style.background = "none";
+    clearBtn.style.border = "none";
+    clearBtn.style.cursor = "pointer";
+    clearBtn.style.color = "var(--text-muted)";
+    clearBtn.style.fontSize = "12px";
+    clearBtn.style.padding = "4px 8px";
+    clearBtn.style.borderRadius = "4px";
+    clearBtn.onmouseover = () => { clearBtn.style.color = "var(--text-normal)"; };
+    clearBtn.onmouseout = () => { clearBtn.style.color = "var(--text-muted)"; };
+    clearBtn.onclick = async () => {
+      this.plugin.clearCheckpoints();
+      this.display();
+    };
+
+    // Render each checkpoint as a card (newest first)
+    for (let i = checkpoints.length - 1; i >= 0; i--) {
+      const cp = checkpoints[i];
+
+      // Card container - matches mapping card style
+      const card = containerEl.createDiv();
+      card.style.background = "var(--background-secondary)";
+      card.style.borderRadius = "8px";
+      card.style.padding = "16px";
+      card.style.marginBottom = "12px";
+
+      // Card header: timestamp + source badge + restore button
+      const header = card.createDiv();
+      header.style.display = "flex";
+      header.style.justifyContent = "space-between";
+      header.style.alignItems = "center";
+      header.style.marginBottom = "12px";
+      header.style.borderBottom = "1px solid var(--background-modifier-border)";
+      header.style.paddingBottom = "8px";
+
+      // Left side: timestamp and source
+      const headerLeft = header.createDiv();
+      headerLeft.style.display = "flex";
+      headerLeft.style.alignItems = "center";
+      headerLeft.style.gap = "8px";
+
+      const timeEl = headerLeft.createEl("span", {
+        text: this.formatTimestamp(cp.timestamp)
+      });
+      timeEl.style.fontSize = "13px";
+      timeEl.style.fontWeight = "600";
+      timeEl.title = cp.timestamp;
+
+      // Source badge
+      const sourceBadge = headerLeft.createDiv();
+      sourceBadge.style.fontSize = "10px";
+      sourceBadge.style.fontWeight = "600";
+      sourceBadge.style.textTransform = "uppercase";
+      sourceBadge.style.letterSpacing = "0.5px";
+      sourceBadge.style.padding = "2px 6px";
+      sourceBadge.style.borderRadius = "4px";
+      sourceBadge.textContent = cp.source || "auto";
+      if ((cp.source || "auto") === "manual") {
+        sourceBadge.style.background = "var(--interactive-accent)";
+        sourceBadge.style.color = "var(--text-on-accent)";
+      } else {
+        sourceBadge.style.background = "var(--background-modifier-border)";
+        sourceBadge.style.color = "var(--text-muted)";
+      }
+
+      // Move count badge
+      const countBadge = headerLeft.createDiv();
+      countBadge.style.fontSize = "11px";
+      countBadge.style.color = "var(--text-muted)";
+      countBadge.textContent = `${cp.moveCount} move${cp.moveCount > 1 ? 's' : ''}`;
+
+      // Right side: revert button
+      const restoreBtn = header.createEl("button");
+      restoreBtn.innerHTML = `<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' style='margin-right:4px;vertical-align:middle;'><polyline points='1 4 1 10 7 10'></polyline><path d='M3.51 15a9 9 0 1 0 2.13-9.36L1 10'></path></svg>Undo this & younger moves`;
+      restoreBtn.style.background = "none";
+      restoreBtn.style.border = "1px solid var(--background-modifier-border)";
+      restoreBtn.style.cursor = "pointer";
+      restoreBtn.style.color = "var(--text-normal)";
+      restoreBtn.style.fontSize = "11px";
+      restoreBtn.style.padding = "3px 8px";
+      restoreBtn.style.borderRadius = "4px";
+      restoreBtn.style.display = "flex";
+      restoreBtn.style.alignItems = "center";
+      restoreBtn.style.gap = "2px";
+      restoreBtn.onmouseover = () => {
+        restoreBtn.style.borderColor = "var(--interactive-accent)";
+        restoreBtn.style.color = "var(--text-accent)";
+      };
+      restoreBtn.onmouseout = () => {
+        restoreBtn.style.borderColor = "var(--background-modifier-border)";
+        restoreBtn.style.color = "var(--text-normal)";
+      };
+      restoreBtn.onclick = async () => {
+        await this.plugin.executeRevert(i);
+        this.display();
+      };
+
+      // Card body: individual moves
+      const movesContainer = card.createDiv();
+      movesContainer.style.marginTop = "4px";
+
+      cp.moves.forEach((m, mIndex) => {
+        const moveRow = movesContainer.createDiv();
+        moveRow.style.display = "flex";
+        moveRow.style.alignItems = "flex-start";
+        moveRow.style.gap = "8px";
+        if (mIndex > 0) {
+          moveRow.style.marginTop = "8px";
+          moveRow.style.paddingTop = "8px";
+          moveRow.style.borderTop = "1px solid var(--background-modifier-border)";
+        }
+
+        // Arrow icon
+        const arrowIcon = moveRow.createDiv();
+        arrowIcon.innerHTML = `<svg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='var(--text-muted)' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' style='margin-top:2px;flex-shrink:0;'><line x1='5' y1='12' x2='19' y2='12'></line><polyline points='12 5 19 12 12 19'></polyline></svg>`;
+
+        // Move details
+        const moveDetails = moveRow.createDiv();
+        moveDetails.style.flex = "1";
+        moveDetails.style.minWidth = "0";
+
+        // Filename
+        const fileEl = moveDetails.createEl("div");
+        fileEl.style.fontSize = "12px";
+        fileEl.style.fontWeight = "500";
+        fileEl.style.fontFamily = "var(--font-monospace)";
+        fileEl.style.marginBottom = "4px";
+        fileEl.textContent = m.file;
+
+        // From/To paths
+        const pathsEl = moveDetails.createDiv();
+        pathsEl.style.display = "flex";
+        pathsEl.style.alignItems = "center";
+        pathsEl.style.gap = "6px";
+        pathsEl.style.fontSize = "11px";
+        pathsEl.style.fontFamily = "var(--font-monospace)";
+
+        const fromEl = pathsEl.createEl("span");
+        fromEl.style.color = "var(--text-muted)";
+        fromEl.style.whiteSpace = "nowrap";
+        fromEl.style.overflow = "hidden";
+        fromEl.style.textOverflow = "ellipsis";
+        fromEl.textContent = m.from;
+        fromEl.title = m.from;
+
+        const arrow = pathsEl.createEl("span");
+        arrow.style.color = "var(--text-muted)";
+        arrow.style.flexShrink = "0";
+        arrow.textContent = "\u2192";
+
+        const toEl = pathsEl.createEl("span");
+        toEl.style.color = "var(--text-normal)";
+        toEl.style.whiteSpace = "nowrap";
+        toEl.style.overflow = "hidden";
+        toEl.style.textOverflow = "ellipsis";
+        toEl.textContent = m.to;
+        toEl.title = m.to;
+
+        // Rule tag (if present)
+        if (m.rule) {
+          const ruleEl = moveDetails.createEl("div");
+          ruleEl.style.marginTop = "4px";
+          const ruleBadge = ruleEl.createDiv();
+          ruleBadge.style.display = "inline-block";
+          ruleBadge.style.fontSize = "10px";
+          ruleBadge.style.fontFamily = "var(--font-monospace)";
+          ruleBadge.style.padding = "1px 6px";
+          ruleBadge.style.borderRadius = "3px";
+          ruleBadge.style.background = "var(--background-modifier-border)";
+          ruleBadge.style.color = "var(--text-muted)";
+          ruleBadge.textContent = m.rule;
+        }
+      });
+    }
+  }
 }
 
 /**
