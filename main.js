@@ -17,7 +17,7 @@ const DEFAULT_SETTINGS = {
   moveOnCreate: true,
   moveOnMetadataChange: true,
   moveOnStartup: true,
-  manualTriggerOnly: false,
+  automaticTriggers: true,
   debugLogging: false,
   processExistingFiles: false,
   processingDelay: 150,
@@ -27,7 +27,8 @@ const DEFAULT_SETTINGS = {
   showRibbonIcon: true,
   undoCheckpoints: [],
   undoMaxCheckpoints: 10,
-  undoAutoCooldownMs: 2000
+  undoAutoCooldownMs: 2000,
+  notificationMode: "onMove"
 };
 
 /**
@@ -479,7 +480,7 @@ module.exports = class PropMove extends Plugin {
     });
 
     // Register event handlers conditionally based on settings
-    if (this.settings.moveOnCreate && !this.settings.manualTriggerOnly) {
+    if (this.settings.moveOnCreate && this.settings.automaticTriggers) {
       this.registerEvent(
         this.app.vault.on("create", (file) => {
           this.logger.debug(`File created, queuing process: ${file.path}`);
@@ -488,7 +489,7 @@ module.exports = class PropMove extends Plugin {
       );
     }
 
-    if (this.settings.moveOnMetadataChange && !this.settings.manualTriggerOnly) {
+    if (this.settings.moveOnMetadataChange && this.settings.automaticTriggers) {
       this.registerEvent(
         this.app.metadataCache.on("changed", (file) => {
           this.logger.debug(`Metadata changed, queuing process: ${file.path}`);
@@ -514,7 +515,7 @@ module.exports = class PropMove extends Plugin {
     );
 
     // Handle startup processing if enabled
-    if (this.settings.moveOnStartup && !this.settings.manualTriggerOnly) {
+    if (this.settings.moveOnStartup && this.settings.automaticTriggers) {
       setTimeout(() => {
         this.isStartup = false;
         this.logger.debug("Startup complete");
@@ -717,9 +718,10 @@ module.exports = class PropMove extends Plugin {
       this.logger.warn(`[UNDO] movedCount=${movedCount} but successfulMoves is empty - checkpoint NOT created`);
     }
 
-    const message = `PropMove: Processed ${processedCount} files, moved ${movedCount}, skipped ${skippedCount}`;
-    this.logger.info(message);
-    new Notice(message);
+    this.logger.info(`PropMove: Processed ${processedCount} files, moved ${movedCount}, skipped ${skippedCount}`);
+    if (this.settings.notificationMode === "all" || (this.settings.notificationMode === "onMove" && movedCount > 0)) {
+      new Notice(`PropMove: Processed ${processedCount} files, moved ${movedCount}, skipped ${skippedCount}`);
+    }
   }
 
   /**
@@ -788,7 +790,10 @@ module.exports = class PropMove extends Plugin {
     }
 
     if (moveCount === 0 && skipCount === 0) {
-      new Notice("PropMove: No files would be moved based on current rules");
+      this.logger.info("PropMove: No files would be moved");
+      if (this.settings.notificationMode === "all") {
+        new Notice("PropMove: No files would be moved based on current rules");
+      }
       return;
     }
 
@@ -813,9 +818,10 @@ module.exports = class PropMove extends Plugin {
       }
     });
 
-    const message = `PropMove Preview: ${moveCount} would move, ${skipCount} would skip. Check console for details.`;
-    this.logger.info(message);
-    new Notice(message);
+    this.logger.info(`PropMove Preview: ${moveCount} would move, ${skipCount} would skip. Check console for details.`);
+    if (this.settings.notificationMode === "all") {
+      new Notice(`PropMove Preview: ${moveCount} would move, ${skipCount} would skip. Check console for details.`);
+    }
   }
 
   /**
@@ -965,12 +971,15 @@ module.exports = class PropMove extends Plugin {
       this.movingPaths.add(file.path);
       const result = await this.fileProcessor.moveFile(file, targetResult.targetFolder);
 
-      // Notify user of specific failures
+      // Notify user of specific failures (only when notifications are enabled)
       if (!result.success && result.message) {
-        if (result.message.includes("folder does not exist")) {
-          new Notice(`PropMove: ${result.message}`);
-        } else if (result.action === "error") {
-          new Notice(`PropMove: Failed to move ${file.name}`);
+        this.logger.info(`[MOVE FAILED] ${result.message}`);
+        if (this.settings.notificationMode === "all") {
+          if (result.message.includes("folder does not exist")) {
+            new Notice(`PropMove: ${result.message}`);
+          } else if (result.action === "error") {
+            new Notice(`PropMove: Failed to move ${file.name}`);
+          }
         }
       }
 
@@ -989,7 +998,9 @@ module.exports = class PropMove extends Plugin {
       return { success: false };
     } catch (error) {
       this.logger.error(`Failed to move ${file.name}: ${error.message}`);
-      new Notice(`PropMove: Failed to move ${file.name}`);
+      if (this.settings.notificationMode !== "none") {
+        new Notice(`PropMove: Failed to move ${file.name}`);
+      }
       return { success: false, error: error.message };
     } finally {
       this.movingPaths.delete(file.path);
@@ -1226,7 +1237,7 @@ module.exports = class PropMove extends Plugin {
       "moveOnCreate",
       "moveOnMetadataChange",
       "moveOnStartup",
-      "manualTriggerOnly",
+      "automaticTriggers",
       "debugLogging",
       "processingDelay",
       "maxFilesPerBatch",
@@ -1235,7 +1246,8 @@ module.exports = class PropMove extends Plugin {
       "showRibbonIcon",
       "undoCheckpoints",
       "undoMaxCheckpoints",
-      "undoAutoCooldownMs"
+      "undoAutoCooldownMs",
+      "notificationMode"
     ];
 
     newSettings.forEach(setting => {
@@ -1587,36 +1599,82 @@ class PropMoveSettingTab extends PluginSettingTab {
 
     containerEl.createEl("h2", { text: "PropMove Settings" });
 
-    // Manual trigger only setting (master switch)
+    this.createSectionHeader(containerEl, "UI");
+
+    // Show ribbon icon toggle (dedicated section)
     new Setting(containerEl)
-      .setName("Manual trigger only")
-      .setDesc("When enabled, files are only moved when manually triggered. All automatic triggers are disabled.")
+      .setName("Show ribbon icon")
+      .setDesc("Display a ribbon icon in the sidebar that opens this settings page")
       .addToggle((toggle) =>
         toggle
-          .setValue(this.plugin.settings.manualTriggerOnly)
+          .setValue(this.plugin.settings.showRibbonIcon)
           .onChange(async (value) => {
-            this.plugin.settings.manualTriggerOnly = value;
+            this.plugin.settings.showRibbonIcon = value;
             await this.plugin.saveSettings();
-            this.display();
+            this.plugin.setupRibbonIcon();
           })
       );
 
-    // Manual Triggers section (always visible, right at the top)
+    // Show notifications dropdown
+    new Setting(containerEl)
+      .setName("Show notifications")
+      .setDesc("Controls when PropMove shows pop-up notifications.")
+      .addDropdown((dropdown) => {
+        dropdown
+          .addOption("all", "All")
+          .addOption("onMove", "On Move")
+          .addOption("none", "None")
+          .setValue(this.plugin.settings.notificationMode)
+          .onChange(async (value) => {
+            this.plugin.settings.notificationMode = value;
+            await this.plugin.saveSettings();
+          })
+      });
+
     this.createSectionHeader(containerEl, "Manual Triggers");
 
     // Render shared manual trigger buttons
     this.plugin.renderManualTriggers(containerEl);
 
-    // Automatic Triggers section (hidden when manual trigger only is enabled)
-    if (!this.plugin.settings.manualTriggerOnly) {
-      this.createSectionHeader(containerEl, "Automatic Triggers");
+    // Automatic Triggers heading with toggle
+    containerEl.createEl("hr");
+    const autoHeadingRow = containerEl.createDiv();
+    autoHeadingRow.style.display = "flex";
+    autoHeadingRow.style.alignItems = "center";
+    autoHeadingRow.style.justifyContent = "space-between";
+    autoHeadingRow.style.marginTop = "24px";
+    autoHeadingRow.style.marginBottom = "12px";
 
-      containerEl.createEl("p", {
-        text: "Configure when files should be automatically moved based on property changes.",
-        cls: "setting-item-description"
-      });
+    const autoH3 = autoHeadingRow.createEl("h3", { text: "Automatic Triggers" });
+    autoH3.style.fontSize = "16px";
+    autoH3.style.fontWeight = "700";
+    autoH3.style.margin = "0";
+    autoH3.style.color = "var(--text-normal)";
+    autoH3.style.letterSpacing = "-0.01em";
 
-      // Trigger event settings
+    // Native Obsidian toggle aligned to the right
+    const autoToggleWrap = autoHeadingRow.createDiv({ cls: "checkbox-container" });
+    const autoToggleInput = autoToggleWrap.createEl("input", { type: "checkbox", tabindex: "0" });
+    autoToggleInput.checked = this.plugin.settings.automaticTriggers;
+    autoToggleWrap.createEl("span", { cls: "checkbox-glyph" });
+    autoToggleWrap.setAttribute("aria-checked", String(this.plugin.settings.automaticTriggers));
+    autoToggleWrap.classList.toggle("is-enabled", this.plugin.settings.automaticTriggers);
+    autoToggleWrap.onclick = async () => {
+      const newVal = !this.plugin.settings.automaticTriggers;
+      this.plugin.settings.automaticTriggers = newVal;
+      autoToggleInput.checked = newVal;
+      autoToggleWrap.setAttribute("aria-checked", String(newVal));
+      autoToggleWrap.classList.toggle("is-enabled", newVal);
+      await this.plugin.saveSettings();
+      this.display();
+    };
+
+    containerEl.createEl("p", {
+      text: "Configure when files should be automatically moved based on property changes.",
+      cls: "setting-item-description"
+    });
+
+    if (this.plugin.settings.automaticTriggers) {
       const triggerSettings = [
         {
           name: "Move on file creation",
@@ -1649,7 +1707,6 @@ class PropMoveSettingTab extends PluginSettingTab {
           );
       });
     }
-
     this.createSectionHeader(containerEl, "Move Behavior");
 
     // Auto-append suffix setting
@@ -1694,22 +1751,6 @@ class PropMoveSettingTab extends PluginSettingTab {
           .onChange(async (value) => {
             this.plugin.settings.caseInsensitiveMatching = value;
             await this.plugin.saveSettings();
-          })
-      );
-
-    this.createSectionHeader(containerEl, "Ribbon Icon");
-
-    // Show ribbon icon toggle (dedicated section)
-    new Setting(containerEl)
-      .setName("Show ribbon icon")
-      .setDesc("Display a ribbon icon in the sidebar that opens this settings page")
-      .addToggle((toggle) =>
-        toggle
-          .setValue(this.plugin.settings.showRibbonIcon)
-          .onChange(async (value) => {
-            this.plugin.settings.showRibbonIcon = value;
-            await this.plugin.saveSettings();
-            this.plugin.setupRibbonIcon();
           })
       );
 
