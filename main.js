@@ -1572,6 +1572,27 @@ class ManualTriggerModal extends Modal {
 
     // Render the same buttons as in the settings tab
     this.plugin.renderManualTriggers(contentEl);
+
+    // Quick link to open full settings
+    const settingsRow = contentEl.createDiv();
+    settingsRow.style.marginTop = "16px";
+    settingsRow.style.textAlign = "center";
+    const settingsLink = settingsRow.createEl("button", {
+      text: "Open Settings",
+      cls: "clickable-icon"
+    });
+    settingsLink.style.background = "none";
+    settingsLink.style.border = "none";
+    settingsLink.style.cursor = "pointer";
+    settingsLink.style.color = "var(--text-accent)";
+    settingsLink.style.fontSize = "13px";
+    settingsLink.style.padding = "8px 16px";
+    settingsLink.onclick = () => {
+      this.close();
+      this.app.setting.open();
+      const propTab = this.app.setting.pluginTabs.find(t => t.id === "propmove");
+      if (propTab) this.app.setting.openTab(propTab);
+    };
   }
 
   onClose() {
@@ -1586,6 +1607,7 @@ class PropMoveSettingTab extends PluginSettingTab {
     super(app, plugin);
     this.plugin = plugin;
     this.suggestInputs = [];
+    this.expandedCheckpoints = new Set();
   }
 
   display() {
@@ -1859,14 +1881,36 @@ class PropMoveSettingTab extends PluginSettingTab {
       text: "Use {propertyName} to create dynamic paths based on frontmatter values."
     });
 
-    // Template variable help section
+    // Template variable help section (collapsible)
     const helpSection = containerEl.createDiv();
     helpSection.style.backgroundColor = "var(--background-secondary)";
-    helpSection.style.padding = "12px";
     helpSection.style.borderRadius = "6px";
     helpSection.style.marginBottom = "16px";
-    
-    helpSection.createEl("strong", { text: "📌 Template Variables & Wildcards Guide:" });
+    helpSection.style.padding = "0";
+
+    const hh = helpSection.createDiv();
+    hh.style.display = "flex";
+    hh.style.alignItems = "center";
+    hh.style.gap = "6px";
+    hh.style.cursor = "pointer";
+    hh.style.padding = "12px";
+    hh.style.userSelect = "none";
+    hh.style.borderRadius = "6px";
+    hh.onmouseover = () => { hh.style.backgroundColor = "var(--background-modifier-hover)"; };
+    hh.onmouseout = () => { hh.style.backgroundColor = "transparent"; };
+
+    const ht = hh.createEl("span");
+    ht.textContent = "\u25B6";
+    ht.style.fontSize = "10px";
+    ht.style.color = "var(--text-muted)";
+
+    hh.createEl("strong", { text: "Template Variables & Wildcards Guide" });
+
+    const hb = helpSection.createDiv();
+    hb.style.display = "none";
+    hb.style.padding = "0 12px 12px 12px";
+    hb.style.borderTop = "1px solid var(--background-modifier-border)";
+
     
     const examples = [
       "{project}/tasks → MyProject/tasks (if project=MyProject)",
@@ -1892,123 +1936,121 @@ class PropMoveSettingTab extends PluginSettingTab {
       });
     }
 
-    this.plugin.settings.properties.forEach((group, groupIndex) => {
-      // Card container
+        this.plugin.settings.properties.forEach((group, groupIndex) => {
+      const valueSuggestInputs = [];
       const card = containerEl.createDiv();
       card.style.background = "var(--background-secondary)";
       card.style.borderRadius = "8px";
-      card.style.padding = "16px";
+      card.style.padding = "0";
       card.style.marginBottom = "12px";
 
-      // Card header: title + trash
-      const header = card.createDiv();
-      header.style.display = "flex";
-      header.style.justifyContent = "space-between";
-      header.style.alignItems = "center";
-      header.style.marginBottom = "12px";
-      header.style.borderBottom = "1px solid var(--background-modifier-border)";
-      header.style.paddingBottom = "8px";
-
-      const title = header.createEl("strong", {
-        text: `Mapping ${groupIndex + 1}`
+      const dh = card.createEl("span");
+      dh.textContent = "\u2630";
+      dh.style.fontSize = "14px";
+      dh.style.color = "var(--text-muted)";
+      dh.style.cursor = "grab";
+      dh.style.padding = "12px 0 0 12px";
+      dh.style.display = "inline-block";
+      dh.setAttribute("draggable", "true");
+      dh.addEventListener("dragstart", (e) => {
+        e.dataTransfer.setData("text/plain", String(groupIndex));
+        card.style.opacity = "0.4";
       });
-      title.style.fontSize = "14px";
+      dh.addEventListener("dragend", () => { card.style.opacity = "1"; });
 
-      const trashBtn = header.createEl("button");
-      trashBtn.innerHTML = "<svg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><polyline points='3 6 5 6 21 6'></polyline><path d='M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2'></path></svg>";
-      trashBtn.style.background = "none";
-      trashBtn.style.border = "none";
-      trashBtn.style.cursor = "pointer";
-      trashBtn.style.color = "var(--text-muted)";
-      trashBtn.style.padding = "4px";
-      trashBtn.style.display = "flex";
-      trashBtn.style.alignItems = "center";
-      trashBtn.title = "Remove mapping";
-      trashBtn.onclick = async () => {
+      card.addEventListener("dragover", (e) => { e.preventDefault(); card.style.border = "2px dashed var(--interactive-accent)"; });
+      card.addEventListener("dragleave", () => { card.style.border = "none"; });
+      card.addEventListener("drop", (e) => {
+        e.preventDefault();
+        card.style.border = "none";
+        const fi = parseInt(e.dataTransfer.getData("text/plain"));
+        const ti = groupIndex;
+        if (fi === ti) return;
+        const p = this.plugin.settings.properties;
+        const [m] = p.splice(fi, 1);
+        p.splice(ti, 0, m);
+        this.plugin.saveSettings();
+        this.display();
+      });
+
+      const hd = card.createDiv();
+      hd.style.display = "flex";
+      hd.style.alignItems = "center";
+      hd.style.gap = "8px";
+      hd.style.padding = "12px";
+      hd.style.cursor = "pointer";
+      hd.style.borderRadius = "8px 8px 0 0";
+
+      const hdt = hd.createEl("span");
+      hdt.textContent = "\u25BC";
+      hdt.style.fontSize = "10px";
+      hdt.style.color = "var(--text-muted)";
+      hdt.style.flexShrink = "0";
+
+      const ps = createSuggestInput(hd, {
+        suggestions: collectVaultPropertyKeys(this.app),
+        placeholder: "property name",
+        initialValue: group.name || "",
+        wrapperFlex: "1",
+        wrapperMinWidth: "80px",
+        onInput: async (val) => {
+          group.name = val.trim();
+          await this.plugin.saveSettings();
+          const v = collectVaultPropertyValues(this.app, val.trim());
+          v.unshift("*");
+          for (const x of valueSuggestInputs) if (x && x.updateSuggestions) x.updateSuggestions(v);
+        },
+        onSelect: async (val) => {
+          group.name = val.trim();
+          await this.plugin.saveSettings();
+          const v = collectVaultPropertyValues(this.app, val.trim());
+          v.unshift("*");
+          for (const x of valueSuggestInputs) if (x && x.updateSuggestions) x.updateSuggestions(v);
+        }
+      });
+      this.suggestInputs.push(ps);
+
+      const n = (group.mappings || []).length;
+      const bg = hd.createEl("span");
+      bg.textContent = n + " rule" + (n !== 1 ? "s" : "");
+      bg.style.fontSize = "11px";
+      bg.style.color = "var(--text-muted)";
+      bg.style.flexShrink = "0";
+
+      const tr = hd.createEl("button");
+      tr.innerHTML = '<svg xmlns=\'http://www.w3.org/2000/svg\' width=\'14\' height=\'14\' viewBox=\'0 0 24 24\' fill=\'none\' stroke=\'currentColor\' stroke-width=\'2\' stroke-linecap=\'round\' stroke-linejoin=\'round\'><polyline points=\'3 6 5 6 21 6\'></polyline><path d=\'M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2\'></path></svg>';
+      tr.style.background = "none";
+      tr.style.border = "none";
+      tr.style.cursor = "pointer";
+      tr.style.color = "var(--text-muted)";
+      tr.style.padding = "2px";
+      tr.style.display = "flex";
+      tr.style.alignItems = "center";
+      tr.style.flexShrink = "0";
+      tr.title = "Remove mapping";
+      tr.onclick = async (e) => {
+        e.stopPropagation();
         this.plugin.settings.properties.splice(groupIndex, 1);
         await this.plugin.saveSettings();
         this.display();
       };
 
-      // Property name input
-      const nameRow = card.createDiv();
-      nameRow.style.display = "flex";
-      nameRow.style.alignItems = "center";
-      nameRow.style.gap = "8px";
-      nameRow.style.marginBottom = "12px";
+      const bd = card.createDiv();
+      bd.style.display = "block";
+      bd.style.padding = "16px";
+      bd.style.borderTop = "1px solid var(--background-modifier-border)";
 
-      const nameLabel = nameRow.createEl("span", {
-        text: "Property name"
-      });
-      nameLabel.style.fontSize = "13px";
-      nameLabel.style.fontWeight = "500";
-
-      // Declare valueSuggestInputs array here so name input callbacks can reference it
-      const valueSuggestInputs = [];
-
-      // Property name suggest input with scrollable dropdown
-      const nameSuggest = createSuggestInput(nameRow, {
-        suggestions: collectVaultPropertyKeys(this.app),
-        placeholder: "type",
-        initialValue: group.name || "",
-        onInput: async (val) => {
-          group.name = val.trim();
-          await this.plugin.saveSettings();
-          // Update value suggestions dynamically when property name changes
-          const propName = group.name || "";
-          const vals = collectVaultPropertyValues(this.app, propName);
-          vals.unshift("*");
-          for (const vSuggest of valueSuggestInputs) {
-            vSuggest.updateSuggestions(vals);
-          }
-        },
-        onSelect: async (val) => {
-          group.name = val.trim();
-          await this.plugin.saveSettings();
-          // Update value suggestions dynamically when property name is selected
-          const propName = group.name || "";
-          const vals = collectVaultPropertyValues(this.app, propName);
-          vals.unshift("*");
-          for (const vSuggest of valueSuggestInputs) {
-            vSuggest.updateSuggestions(vals);
-          }
-        }
-      });
-      this.suggestInputs.push(nameSuggest);
-
-      // Auto-update toggle
-      const toggleRow = card.createDiv();
-      toggleRow.style.display = "flex";
-      toggleRow.style.alignItems = "center";
-      toggleRow.style.gap = "8px";
-      toggleRow.style.marginBottom = "8px";
-
-      const toggleCheckbox = toggleRow.createEl("input", {
-        type: "checkbox"
-      });
-      toggleCheckbox.checked = group.autoUpdatePaths !== false;
-      toggleCheckbox.onchange = async () => {
-        group.autoUpdatePaths = toggleCheckbox.checked;
-        await this.plugin.saveSettings();
+      hd.onclick = () => {
+        const c = bd.style.display === "none";
+        bd.style.display = c ? "block" : "none";
+        hdt.textContent = c ? "\u25BC" : "\u25B6";
+        hd.style.borderRadius = c ? "8px" : "8px 8px 0 0";
       };
-
-      const toggleLabel = toggleRow.createEl("span", {
-        text: "Update paths on folder rename"
-      });
-      toggleLabel.style.fontSize = "12px";
-      toggleLabel.title = "When a folder is renamed in the vault, automatically update target paths for this property";
-
-      const mappings = Array.isArray(group.mappings) ? group.mappings : [];
-
-      // Collect initial value suggestions from vault for current property
+const mappings = Array.isArray(group.mappings) ? group.mappings : [];
       const initialVals = collectVaultPropertyValues(this.app, group.name || "");
       initialVals.unshift("*");
-
-      // Collect folder suggestions
       const folderSuggestions = collectVaultFolders(this.app);
-
-      // Mappings section container (scrollable to prevent overflow)
-      const mappingsContainer = card.createDiv();
+      const mappingsContainer = bd.createDiv();
       mappingsContainer.style.marginTop = "12px";
       mappingsContainer.style.maxHeight = "350px";
       mappingsContainer.style.overflowY = mappings.length > 8 ? "auto" : "visible";
@@ -2141,7 +2183,7 @@ class PropMoveSettingTab extends PluginSettingTab {
       });
 
       // Add mapping button
-      const addMapRow = card.createDiv();
+      const addMapRow = bd.createDiv();
       addMapRow.style.marginTop = "8px";
       addMapRow.style.marginBottom = "4px";
 
@@ -2159,6 +2201,30 @@ class PropMoveSettingTab extends PluginSettingTab {
         await this.plugin.saveSettings();
         this.display();
       };
+
+      // Auto-update toggle at bottom of card
+      const ur = bd.createDiv();
+      ur.style.display = "flex";
+      ur.style.alignItems = "center";
+      ur.style.justifyContent = "flex-end";
+      ur.style.gap = "6px";
+      ur.style.marginTop = "12px";
+      ur.style.paddingTop = "8px";
+      ur.style.borderTop = "1px solid var(--background-modifier-border)";
+
+      const uc = ur.createEl("input", { type: "checkbox" });
+      uc.checked = group.autoUpdatePaths !== false;
+      uc.onchange = async () => {
+        group.autoUpdatePaths = uc.checked;
+        await this.plugin.saveSettings();
+      };
+
+      const ul = ur.createEl("span", {
+        text: "Update paths on folder rename"
+      });
+      ul.style.fontSize = "11px";
+      ul.style.color = "var(--text-muted)";
+      ul.title = "When a folder is renamed, automatically update target paths for this property";
     });
 
     new Setting(containerEl).addButton((button) => {
@@ -2405,16 +2471,55 @@ class PropMoveSettingTab extends PluginSettingTab {
         restoreBtn.style.color = "var(--text-normal)";
       };
       restoreBtn.onclick = async () => {
+        const cnt = cp.moves ? cp.moves.length : 0;
+        if (!confirm(`Undo ${cnt} move${cnt !== 1 ? "s" : ""}? This will move files back to their original locations.`)) return;
         await this.plugin.executeRevert(i);
         this.display();
       };
 
-      // Card body: individual moves
+      // Card body: individual moves (collapsible)
+      const moveCnt = cp.moves ? cp.moves.length : 0;
+      const isExp = this.expandedCheckpoints.has(i);
       const movesContainer = card.createDiv();
       movesContainer.style.marginTop = "4px";
 
+      const sr = movesContainer.createDiv();
+      sr.style.display = "flex";
+      sr.style.alignItems = "center";
+      sr.style.gap = "6px";
+      sr.style.cursor = "pointer";
+      sr.style.padding = "4px 2px";
+      sr.style.borderRadius = "4px";
+      sr.style.userSelect = "none";
+      sr.onmouseover = () => { sr.style.backgroundColor = "var(--background-modifier-hover)"; };
+      sr.onmouseout = () => { sr.style.backgroundColor = "transparent"; };
+
+      const tgl = sr.createEl("span");
+      tgl.textContent = isExp ? "\u25BC" : "\u25B6";
+      tgl.style.fontSize = "10px";
+      tgl.style.color = "var(--text-muted)";
+      tgl.style.display = "inline-block";
+
+      const st = sr.createEl("span");
+      st.textContent = `${moveCnt} file${moveCnt !== 1 ? "s" : ""} moved`;
+      st.style.fontSize = "12px";
+      st.style.color = "var(--text-muted)";
+      st.style.flex = "1";
+
+      const dc = card.createDiv();
+      dc.style.display = isExp ? "block" : "none";
+      dc.style.marginTop = "8px";
+
+      sr.onclick = () => {
+        const h = dc.style.display === "none";
+        dc.style.display = h ? "block" : "none";
+        tgl.textContent = h ? "\u25BC" : "\u25B6";
+        if (h) this.expandedCheckpoints.add(i);
+        else this.expandedCheckpoints.delete(i);
+      };
+
       cp.moves.forEach((m, mIndex) => {
-        const moveRow = movesContainer.createDiv();
+        const moveRow = dc.createDiv();
         moveRow.style.display = "flex";
         moveRow.style.alignItems = "flex-start";
         moveRow.style.gap = "8px";
