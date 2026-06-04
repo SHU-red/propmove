@@ -1578,7 +1578,7 @@ class ManualTriggerModal extends Modal {
     settingsRow.style.marginTop = "16px";
     settingsRow.style.textAlign = "center";
     const settingsLink = settingsRow.createEl("button", {
-      text: "Open Settings",
+      text: "PropMove Settings",
       cls: "clickable-icon"
     });
     settingsLink.style.background = "none";
@@ -1587,6 +1587,7 @@ class ManualTriggerModal extends Modal {
     settingsLink.style.color = "var(--text-accent)";
     settingsLink.style.fontSize = "13px";
     settingsLink.style.padding = "8px 16px";
+    settingsLink.style.display = "inline-block";
     settingsLink.onclick = () => {
       this.close();
       this.app.setting.open();
@@ -1608,9 +1609,12 @@ class PropMoveSettingTab extends PluginSettingTab {
     this.plugin = plugin;
     this.suggestInputs = [];
     this.expandedCheckpoints = new Set();
+    this.expandedCards = new Set();
   }
 
   display() {
+    const sc = this.containerEl.closest(".vertical-tab-content") || this.containerEl.parentElement;
+    const sp = sc ? sc.scrollTop : 0;
     // Clean up old suggest inputs to prevent memory leaks
     for (const input of this.suggestInputs) {
       input.destroy();
@@ -1911,7 +1915,12 @@ class PropMoveSettingTab extends PluginSettingTab {
     hb.style.padding = "0 12px 12px 12px";
     hb.style.borderTop = "1px solid var(--background-modifier-border)";
 
-    
+    hh.onclick = () => {
+      const h = hb.style.display === "none";
+      hb.style.display = h ? "block" : "none";
+      ht.textContent = h ? "\u25BC" : "\u25B6";
+    };
+
     const examples = [
       "{project}/tasks → MyProject/tasks (if project=MyProject)",
       "{project}/tasks/{priority} → MyProject/tasks/high",
@@ -1920,7 +1929,7 @@ class PropMoveSettingTab extends PluginSettingTab {
       "* as property value → matches ANY non-empty property value"
     ];
     
-    const listContainer = helpSection.createDiv();
+    const listContainer = hb.createDiv();
     listContainer.style.marginTop = "8px";
     examples.forEach(example => {
       const item = listContainer.createEl("div", { text: "• " + example });
@@ -1938,25 +1947,13 @@ class PropMoveSettingTab extends PluginSettingTab {
 
         this.plugin.settings.properties.forEach((group, groupIndex) => {
       const valueSuggestInputs = [];
+      const isCardExpanded = this.expandedCards.has(groupIndex);
       const card = containerEl.createDiv();
       card.style.background = "var(--background-secondary)";
       card.style.borderRadius = "8px";
       card.style.padding = "0";
       card.style.marginBottom = "12px";
 
-      const dh = card.createEl("span");
-      dh.textContent = "\u2630";
-      dh.style.fontSize = "14px";
-      dh.style.color = "var(--text-muted)";
-      dh.style.cursor = "grab";
-      dh.style.padding = "12px 0 0 12px";
-      dh.style.display = "inline-block";
-      dh.setAttribute("draggable", "true");
-      dh.addEventListener("dragstart", (e) => {
-        e.dataTransfer.setData("text/plain", String(groupIndex));
-        card.style.opacity = "0.4";
-      });
-      dh.addEventListener("dragend", () => { card.style.opacity = "1"; });
 
       card.addEventListener("dragover", (e) => { e.preventDefault(); card.style.border = "2px dashed var(--interactive-accent)"; });
       card.addEventListener("dragleave", () => { card.style.border = "none"; });
@@ -1977,15 +1974,22 @@ class PropMoveSettingTab extends PluginSettingTab {
       hd.style.display = "flex";
       hd.style.alignItems = "center";
       hd.style.gap = "8px";
-      hd.style.padding = "12px";
-      hd.style.cursor = "pointer";
+      hd.style.padding = "12px 12px 4px 12px";
       hd.style.borderRadius = "8px 8px 0 0";
-
-      const hdt = hd.createEl("span");
-      hdt.textContent = "\u25BC";
-      hdt.style.fontSize = "10px";
-      hdt.style.color = "var(--text-muted)";
-      hdt.style.flexShrink = "0";
+      hd.style.borderBottom = "1px solid var(--background-modifier-border)";
+      const dh = hd.createEl("span");
+      dh.textContent = "\u2630";
+      dh.style.fontSize = "14px";
+      dh.style.color = "var(--text-muted)";
+      dh.style.cursor = "grab";
+      dh.style.padding = "4px";
+      dh.style.display = "inline-block";
+      dh.setAttribute("draggable", "true");
+      dh.addEventListener("dragstart", (e) => {
+        e.dataTransfer.setData("text/plain", String(groupIndex));
+        card.style.opacity = "0.4";
+      });
+      dh.addEventListener("dragend", () => { card.style.opacity = "1"; });
 
       const ps = createSuggestInput(hd, {
         suggestions: collectVaultPropertyKeys(this.app),
@@ -2030,21 +2034,43 @@ class PropMoveSettingTab extends PluginSettingTab {
       tr.title = "Remove mapping";
       tr.onclick = async (e) => {
         e.stopPropagation();
+        const name = group.name || 'this mapping';
+        if (!confirm("Remove " + name + "?")) return;
         this.plugin.settings.properties.splice(groupIndex, 1);
         await this.plugin.saveSettings();
         this.display();
       };
 
-      const bd = card.createDiv();
-      bd.style.display = "block";
-      bd.style.padding = "16px";
-      bd.style.borderTop = "1px solid var(--background-modifier-border)";
+      const sr = card.createDiv();
+      sr.style.display = "flex";
+      sr.style.alignItems = "center";
+      sr.style.gap = "6px";
+      sr.style.cursor = "pointer";
+      sr.style.padding = "8px 12px";
+      sr.style.userSelect = "none";
 
-      hd.onclick = () => {
-        const c = bd.style.display === "none";
-        bd.style.display = c ? "block" : "none";
-        hdt.textContent = c ? "\u25BC" : "\u25B6";
-        hd.style.borderRadius = c ? "8px" : "8px 8px 0 0";
+      const srt = sr.createEl("span");
+      srt.textContent = isCardExpanded ? "\u25BC" : "\u25B6";
+      srt.style.fontSize = "10px";
+      srt.style.color = "var(--text-muted)";
+      srt.style.display = "inline-block";
+
+      const src = sr.createEl("span");
+      const cnt = (group.mappings || []).length;
+      src.textContent = cnt + " mapping" + (cnt !== 1 ? "s" : "");
+      src.style.fontSize = "12px";
+      src.style.color = "var(--text-muted)";
+
+      const bd = card.createDiv();
+      bd.style.display = isCardExpanded ? "block" : "none";
+      bd.style.padding = "16px";
+      
+
+      sr.onclick = () => {
+        const h = bd.style.display === "none";
+        bd.style.display = h ? "block" : "none";
+        srt.textContent = h ? "\u25BC" : "\u25B6";
+        if (h) this.expandedCards.add(groupIndex); else this.expandedCards.delete(groupIndex);
       };
 const mappings = Array.isArray(group.mappings) ? group.mappings : [];
       const initialVals = collectVaultPropertyValues(this.app, group.name || "");
@@ -2175,6 +2201,7 @@ const mappings = Array.isArray(group.mappings) ? group.mappings : [];
         mapTrash.style.alignItems = "center";
         mapTrash.title = "Remove mapping";
         mapTrash.onclick = async () => {
+          if (!confirm("Remove this mapping rule?")) return;
           mappings.splice(index, 1);
           group.mappings = mappings;
           await this.plugin.saveSettings();
@@ -2182,44 +2209,45 @@ const mappings = Array.isArray(group.mappings) ? group.mappings : [];
         };
       });
 
-      // Add mapping button
-      const addMapRow = bd.createDiv();
-      addMapRow.style.marginTop = "8px";
-      addMapRow.style.marginBottom = "4px";
 
-      const addMapBtn = addMapRow.createEl("button");
-      addMapBtn.textContent = "+ Add mapping";
-      addMapBtn.style.background = "none";
-      addMapBtn.style.border = "none";
-      addMapBtn.style.cursor = "pointer";
-      addMapBtn.style.color = "var(--text-accent)";
-      addMapBtn.style.fontSize = "12px";
-      addMapBtn.style.padding = "4px 0";
-      addMapBtn.onclick = async () => {
+
+      // Footer row: add mapping + auto-update toggle
+      const ur = bd.createDiv();
+      ur.style.display = "flex";
+      ur.style.alignItems = "center";
+      ur.style.justifyContent = "space-between";
+      ur.style.marginTop = "12px";
+      ur.style.paddingTop = "8px";
+      ur.style.borderTop = "1px solid var(--background-modifier-border)";
+
+      const addBtn = ur.createEl("button");
+      addBtn.textContent = "+ Add mapping";
+      addBtn.style.background = "none";
+      addBtn.style.border = "none";
+      addBtn.style.cursor = "pointer";
+      addBtn.style.color = "var(--text-accent)";
+      addBtn.style.fontSize = "12px";
+      addBtn.style.padding = "0";
+      addBtn.onclick = async () => {
         mappings.push({ value: "", folder: "" });
         group.mappings = mappings;
         await this.plugin.saveSettings();
         this.display();
       };
 
-      // Auto-update toggle at bottom of card
-      const ur = bd.createDiv();
-      ur.style.display = "flex";
-      ur.style.alignItems = "center";
-      ur.style.justifyContent = "flex-end";
-      ur.style.gap = "6px";
-      ur.style.marginTop = "12px";
-      ur.style.paddingTop = "8px";
-      ur.style.borderTop = "1px solid var(--background-modifier-border)";
+      const rightGroup = ur.createDiv();
+      rightGroup.style.display = "flex";
+      rightGroup.style.alignItems = "center";
+      rightGroup.style.gap = "6px";
 
-      const uc = ur.createEl("input", { type: "checkbox" });
+      const uc = rightGroup.createEl("input", { type: "checkbox" });
       uc.checked = group.autoUpdatePaths !== false;
       uc.onchange = async () => {
         group.autoUpdatePaths = uc.checked;
         await this.plugin.saveSettings();
       };
 
-      const ul = ur.createEl("span", {
+      const ul = rightGroup.createEl("span", {
         text: "Update paths on folder rename"
       });
       ul.style.fontSize = "11px";
@@ -2229,7 +2257,7 @@ const mappings = Array.isArray(group.mappings) ? group.mappings : [];
 
     new Setting(containerEl).addButton((button) => {
       button
-        .setButtonText("Add mapping")
+        .setButtonText("Add property")
         .setCta()
         .onClick(async () => {
           this.plugin.settings.properties.push({ name: "", mappings: [] });
@@ -2240,6 +2268,7 @@ const mappings = Array.isArray(group.mappings) ? group.mappings : [];
 
     containerEl.createEl("hr");
     this.renderHistorySection(containerEl);
+    setTimeout(() => { if (sc) sc.scrollTop = sp; }, 0);
   }
 
   /**
