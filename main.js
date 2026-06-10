@@ -141,29 +141,77 @@ class FileProcessor {
 
   /**
    * Interpolate variables in folder path template
-   * Replaces {propertyName} with values from frontmatter
+   * Replaces {propertyName} and {file.*} variables with values from frontmatter or file metadata.
+   * Supports {file.ctime:yyyy} etc. for date formatting.
    * @param {string} path - Path template with {variable} placeholders
    * @param {Object} frontmatter - Frontmatter object with properties
+   * @param {Object} [file] - TFile instance for {file.*} variables
    * @returns {string} Interpolated path
    */
-  interpolateVariables(path, frontmatter) {
+  interpolateVariables(path, frontmatter, file) {
     if (!path || typeof path !== 'string') return path;
 
-    return path.replace(/{(\w+)}/g, (match, propName) => {
-      const value = frontmatter[propName];
-      if (value === null || value === undefined) {
-        this.logger.debug(`[INTERPOLATE] Property '${propName}' not found in frontmatter, keeping literal: ${match}`);
-        return match; // Keep the placeholder if property not found
+    const FILE_VARIABLES = {
+      basename:  function(f) { return f.basename; },
+      name:      function(f) { return f.name; },
+      extension: function(f) { return f.extension; },
+      folder:    function(f) { return f.parent ? f.parent.path : ''; },
+      path:      function(f) { return f.path; },
+      ctime:     function(f) { return new Date(f.stat.ctime); },
+      mtime:     function(f) { return new Date(f.stat.mtime); }
+    };
+
+    const DATE_FORMATS = {
+      yyyy: function(d) { return String(d.getFullYear()); },
+      yy:   function(d) { return String(d.getFullYear()).slice(-2); },
+      MM:   function(d) { return String(d.getMonth() + 1).padStart(2, '0'); },
+      M:    function(d) { return String(d.getMonth() + 1); },
+      dd:   function(d) { return String(d.getDate()).padStart(2, '0'); },
+      d:    function(d) { return String(d.getDate()); },
+      HH:   function(d) { return String(d.getHours()).padStart(2, '0'); },
+      mm:   function(d) { return String(d.getMinutes()).padStart(2, '0'); },
+      ss:   function(d) { return String(d.getSeconds()).padStart(2, '0'); }
+    };
+
+    var that = this;
+    return path.replace(/{([\w.:]+)}/g, function(match, token) {
+      var parts = token.split(':');
+      var key = parts[0];
+      var format = parts[1] || null;
+
+      // Handle {file.*} variables
+      if (key.indexOf('file.') === 0) {
+        var fileKey = key.slice(5); // remove 'file.' prefix
+        if (!file || !FILE_VARIABLES[fileKey]) {
+          that.logger.debug('[INTERPOLATE] Unknown file variable \'' + fileKey + '\', keeping literal: ' + match);
+          return match;
+        }
+        var resolved = FILE_VARIABLES[fileKey](file);
+        if (resolved instanceof Date) {
+          if (format && DATE_FORMATS[format]) {
+            return DATE_FORMATS[format](resolved);
+          }
+          // No format given — default to ISO date string (YYYY-MM-DD)
+          return DATE_FORMATS['yyyy'](resolved) + '-' + DATE_FORMATS['MM'](resolved) + '-' + DATE_FORMATS['dd'](resolved);
+        }
+        return String(resolved);
       }
 
-      let normalized = String(value).trim();
+      // Frontmatter lookup (existing behavior)
+      var value = frontmatter ? frontmatter[key] : undefined;
+      if (value === null || value === undefined) {
+        that.logger.debug('[INTERPOLATE] Property \'' + key + '\' not found in frontmatter, keeping literal: ' + match);
+        return match;
+      }
+
+      var normalized = String(value).trim();
       if (normalized.length === 0) {
-        this.logger.debug(`[INTERPOLATE] Property '${propName}' is empty, keeping literal: ${match}`);
+        that.logger.debug('[INTERPOLATE] Property \'' + key + '\' is empty, keeping literal: ' + match);
         return match;
       }
 
       normalized = stripWikiLink(normalized);
-      this.logger.debug(`[INTERPOLATE] Replaced {${propName}} with '${normalized}'`);
+      that.logger.debug('[INTERPOLATE] Replaced {' + key + '} with \'' + normalized + '\'');
       return normalized;
     });
   }
@@ -185,7 +233,7 @@ class FileProcessor {
     }
 
     // Interpolate variables in the target folder
-    const interpolatedFolder = this.interpolateVariables(targetResult.targetFolder, frontmatter);
+    const interpolatedFolder = this.interpolateVariables(targetResult.targetFolder, frontmatter, file);
     const normalizedFolder = normalizePath(interpolatedFolder);
     const targetPath = normalizePath(`${normalizedFolder}/${file.name}`);
 
@@ -251,7 +299,7 @@ class FileProcessor {
     const cache = this.app.metadataCache.getFileCache(file);
     const frontmatter = cache ? cache.frontmatter : null;
     const interpolatedFolder = frontmatter 
-      ? this.interpolateVariables(targetFolder, frontmatter)
+      ? this.interpolateVariables(targetFolder, frontmatter, file)
       : targetFolder;
 
     const normalizedFolder = normalizePath(interpolatedFolder);
@@ -1885,6 +1933,11 @@ class PropMoveSettingTab extends PluginSettingTab {
       text: "Use {propertyName} to create dynamic paths based on frontmatter values."
     });
 
+    containerEl.createEl("p", {
+      text: "First-matching rule wins — drag cards to set priority.",
+      cls: "setting-item-description"
+    });
+
     // Template variable help section (collapsible)
     const helpSection = containerEl.createDiv();
     helpSection.style.backgroundColor = "var(--background-secondary)";
@@ -1908,7 +1961,7 @@ class PropMoveSettingTab extends PluginSettingTab {
     ht.style.fontSize = "10px";
     ht.style.color = "var(--text-muted)";
 
-    hh.createEl("strong", { text: "Template Variables & Wildcards Guide" });
+    hh.createEl("strong", { text: "Variable Reference" });
 
     const hb = helpSection.createDiv();
     hb.style.display = "none";
@@ -1921,22 +1974,87 @@ class PropMoveSettingTab extends PluginSettingTab {
       ht.textContent = h ? "\u25BC" : "\u25B6";
     };
 
-    const examples = [
-      "{project}/tasks → MyProject/tasks (if project=MyProject)",
-      "{project}/tasks/{priority} → MyProject/tasks/high",
-      "Archive/{status}/{date} → Archive/complete/2025-02-24",
-      "Zones/{zone}/Projects/{project} → Zones/Dev/Projects/MyApp",
-      "* as property value → matches ANY non-empty property value"
-    ];
-    
-    const listContainer = hb.createDiv();
-    listContainer.style.marginTop = "8px";
-    examples.forEach(example => {
-      const item = listContainer.createEl("div", { text: "• " + example });
+    // --- Variables Table ---
+    const tableHeader = hb.createEl("h4", { text: "Available Variables" });
+    tableHeader.style.margin = "12px 0 8px 0";
+    tableHeader.style.fontSize = "13px";
+    tableHeader.style.fontWeight = "600";
+
+    const varTable = hb.createEl("table");
+    varTable.style.width = "100%";
+    varTable.style.borderCollapse = "collapse";
+    varTable.style.fontSize = "12px";
+
+    function addVarRow(variable, description, example) {
+      const row = varTable.createEl("tr");
+      row.style.borderBottom = "1px solid var(--background-modifier-border)";
+
+      const varCell = row.createEl("td");
+      varCell.style.padding = "6px 8px";
+      varCell.style.verticalAlign = "middle";
+      varCell.style.whiteSpace = "nowrap";
+
+      const code = varCell.createEl("code", { text: variable });
+      code.style.fontSize = "12px";
+      code.style.background = "var(--background-primary)";
+      code.style.padding = "2px 6px";
+      code.style.borderRadius = "3px";
+      code.style.cursor = "pointer";
+      code.title = "Click to copy";
+      code.onclick = function() {
+        navigator.clipboard.writeText(variable).then(function() {
+          new Notice("Copied: " + variable);
+        });
+      };
+
+      const descCell = row.createEl("td");
+      descCell.style.padding = "6px 8px";
+      descCell.style.color = "var(--text-muted)";
+      descCell.textContent = description;
+
+      const exCell = row.createEl("td");
+      exCell.style.padding = "6px 8px";
+      exCell.style.color = "var(--text-muted)";
+      exCell.style.fontStyle = "italic";
+      exCell.textContent = example;
+    }
+
+    addVarRow("{propertyName}", "Value of any frontmatter property", "active");
+    addVarRow("{file.basename}", "Filename without extension", "My Note");
+    addVarRow("{file.folder}", "Parent folder path", "Inbox/Projects");
+    addVarRow("{file.ctime}", "File creation date (YYYY-MM-DD)", "2026-06-10");
+    addVarRow("{file.ctime:yyyy}", "Creation year (4-digit)", "2026");
+    addVarRow("{file.ctime:MM}", "Creation month (zero-padded)", "06");
+    addVarRow("{file.ctime:dd}", "Creation day (zero-padded)", "10");
+    addVarRow("{file.ctime:HH:mm}", "Creation time (HH:mm format — stack two tokens, see example below)", "14:30");
+    addVarRow("{file.mtime}", "File modified date (YYYY-MM-DD)", "2026-06-10");
+    addVarRow("{file.mtime:yyyy}", "Modified year (2-digit)", "26");
+    addVarRow("{file.mtime:MM}", "Modified month (zero-padded)", "06");
+    addVarRow("{file.mtime:dd}", "Modified day (zero-padded)", "10");
+    addVarRow("* (wildcard)", "Value matches ANY non-empty frontmatter value", "matches all");
+
+    // --- Examples Section ---
+    const exHeader = hb.createEl("h4", { text: "Examples" });
+    exHeader.style.margin = "16px 0 8px 0";
+    exHeader.style.fontSize = "13px";
+    exHeader.style.fontWeight = "600";
+
+    const exList = hb.createEl("div");
+
+    function addExample(exText) {
+      const item = exList.createEl("div", { text: "\u2022 " + exText });
       item.style.fontSize = "12px";
       item.style.marginBottom = "4px";
       item.style.color = "var(--text-muted)";
-    });
+    }
+
+    addExample("{status}/tasks \u2192 active/tasks (if status=active)");
+    addExample("{project}/{priority} \u2192 MyProject/high");
+    addExample("Archive/{file.ctime:yyyy}/{file.ctime:MM} \u2192 Archive/2026/06");
+    addExample("By-Date/{file.ctime:yyyy}/{file.ctime:MM}/{file.ctime:dd} \u2192 By-Date/2026/06/10");
+    addExample("Logs/{file.mtime:yyyy}/{file.mtime:MM} \u2192 Logs/2026/06");
+    addExample("{file.basename} \u2192 My Note (moves file to a folder named after itself)");
+    addExample("Combined: Zone/{project}/{file.mtime:yyyy}/{status} \u2192 Zone/MyApp/2026/active");
 
     if (this.plugin.settings.properties.length === 0) {
       containerEl.createEl("p", {
