@@ -16,9 +16,13 @@ else
 fi
 NEW_VERSION="$MAJOR.$MINOR.$PATCH"
 
-# 2. Update file, commit, and tag
+# 2. Update files, commit, and tag
 jq --arg ver "$NEW_VERSION" '.version = $ver' manifest.json > tmp.json && mv tmp.json manifest.json
-git add manifest.json
+
+# Update versions.json with new version
+jq --arg ver "$NEW_VERSION" --arg minapp "1.5.0" '. + {($ver): $minapp}' versions.json > tmp.json && mv tmp.json versions.json
+
+git add manifest.json versions.json
 git commit -m "chore: bump version to $NEW_VERSION"
 git tag -a "$NEW_VERSION" -m "$NEW_VERSION"
 

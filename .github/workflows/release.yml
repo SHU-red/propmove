@@ -12,19 +12,27 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
 
       - name: Create release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           tag="${GITHUB_REF#refs/tags/}"
-          
-          files=("main.js" "manifest.json")
-          if [ -s "styles.css" ]; then
-            files+=("styles.css")
+
+          prev_tag="$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || true)"
+          if [ -n "$prev_tag" ]; then
+            notes="$(git log "$prev_tag..HEAD" --pretty=format:'- %s' --no-merges)"
+            body="## Release $tag\n\n$notes"
+          else
+            body="## Release $tag"
           fi
+
+          files=("main.js" "manifest.json" "versions.json")
+          [ -s "styles.css" ] && files+=("styles.css")
 
           gh release create "$tag" \
             --title="$tag" \
-            --generate-notes \
+            --notes "$body" \
             "${files[@]}"
