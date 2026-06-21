@@ -56,7 +56,8 @@ git add manifest.json versions.json
 git commit -m "chore: bump version to $NEW_VERSION"
 
 # Create annotated tag with structured changelog
-git tag -a "$NEW_VERSION" -m "$changelog"
+# --cleanup=verbatim prevents git from stripping # heading lines as comments
+git tag -a "$NEW_VERSION" -m "$changelog" --cleanup=verbatim
 
 # 4. Push everything to GitHub
 # GitHub Actions (release.yml) reads the tag message as release body
