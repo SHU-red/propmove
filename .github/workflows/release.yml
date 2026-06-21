@@ -21,13 +21,8 @@ jobs:
         run: |
           tag="${GITHUB_REF#refs/tags/}"
 
-          prev_tag="$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || true)"
-          if [ -n "$prev_tag" ]; then
-            notes="$(git log "$prev_tag..HEAD" --pretty=format:'- %s' --no-merges)"
-            body="## Release $tag\n\n$notes"
-          else
-            body="## Release $tag"
-          fi
+          # Read changelog from the annotated tag message
+          body="$(git tag -l --format='%(contents)' "$tag")"
 
           files=("main.js" "manifest.json" "versions.json")
           [ -s "styles.css" ] && files+=("styles.css")
