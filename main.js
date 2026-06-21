@@ -1656,6 +1656,7 @@ class PropMoveSettingTab extends PluginSettingTab {
     super(app, plugin);
     this.plugin = plugin;
     this.suggestInputs = [];
+    this.filterState = { text: "", fromDate: "", toDate: "", source: "all" };
     this.expandedCheckpoints = new Set();
     this.expandedCards = new Set();
   }
@@ -2427,6 +2428,7 @@ const mappings = Array.isArray(group.mappings) ? group.mappings : [];
   /**
    * Render the history section in settings.
    * Each checkpoint is a card matching the mapping card design.
+   * Includes a meta-tag filter input that re-renders cards without losing focus.
    */
   renderHistorySection(containerEl) {
     const checkpoints = this.plugin.settings.undoCheckpoints || [];
@@ -2440,304 +2442,467 @@ const mappings = Array.isArray(group.mappings) ? group.mappings : [];
     h3.style.color = "var(--text-normal)";
     h3.style.letterSpacing = "-0.01em";
 
-    if (checkpoints.length === 0) {
-      // Max checkpoints setting even when empty
-      const emptyRow = containerEl.createDiv();
-      emptyRow.style.marginBottom = "12px";
-      emptyRow.style.display = "flex";
-      emptyRow.style.justifyContent = "flex-start";
-      emptyRow.style.alignItems = "center";
-      const emptyMaxContainer = emptyRow.createDiv();
-      emptyMaxContainer.style.display = "flex";
-      emptyMaxContainer.style.alignItems = "center";
-      emptyMaxContainer.style.gap = "8px";
-      const emptyMaxLabel = emptyMaxContainer.createEl("label");
-      emptyMaxLabel.textContent = "Max checkpoints:";
-      emptyMaxLabel.style.fontSize = "12px";
-      emptyMaxLabel.style.color = "var(--text-muted)";
-      emptyMaxLabel.style.fontWeight = "500";
-      const emptyMaxInput = emptyMaxContainer.createEl("input", { type: "number" });
-      emptyMaxInput.value = this.plugin.settings.undoMaxCheckpoints || 10;
-      emptyMaxInput.min = "0";
-      emptyMaxInput.max = "1000";
-      emptyMaxInput.style.width = "60px";
-      emptyMaxInput.style.fontSize = "12px";
-      emptyMaxInput.style.padding = "2px 4px";
-      emptyMaxInput.title = "Maximum number of checkpoints to store. Set to 0 for unlimited.";
-      emptyMaxInput.onchange = async () => {
-        const val = parseInt(emptyMaxInput.value, 10);
+    // Filter controls inside a bordered box
+    const filterBody = containerEl.createDiv();
+    filterBody.style.border = "1px solid var(--background-modifier-border)";
+    filterBody.style.borderRadius = "6px";
+    filterBody.style.padding = "10px";
+    filterBody.style.marginBottom = "12px";
+
+    // Row 1: text search
+    const textInput = filterBody.createEl("input", {
+      type: "text",
+      placeholder: "Filter by name or path\u2026"
+    });
+    textInput.style.width = "100%";
+    textInput.style.fontSize = "13px";
+    textInput.style.padding = "6px 10px";
+    textInput.style.borderRadius = "6px";
+    textInput.style.border = "1px solid var(--background-modifier-border)";
+    textInput.style.outline = "none";
+    textInput.style.background = "var(--background-secondary)";
+    textInput.style.color = "var(--text-normal)";
+    textInput.style.boxSizing = "border-box";
+    textInput.style.marginBottom = "8px";
+    textInput.value = this.filterState.text;
+
+    // Row 2: date range + source dropdown
+    const filterRow2 = filterBody.createDiv();
+    filterRow2.style.display = "flex";
+    filterRow2.style.alignItems = "center";
+    filterRow2.style.gap = "8px";
+    filterRow2.style.flexWrap = "wrap";
+
+    const fromLabel = filterRow2.createEl("label");
+    fromLabel.textContent = "From:";
+    fromLabel.style.fontSize = "12px";
+    fromLabel.style.color = "var(--text-muted)";
+    fromLabel.style.fontWeight = "500";
+    fromLabel.style.flexShrink = "0";
+
+    const fromInput = filterRow2.createEl("input", { type: "date" });
+    fromInput.style.fontSize = "12px";
+    fromInput.style.padding = "4px 6px";
+    fromInput.style.borderRadius = "4px";
+    fromInput.style.border = "1px solid var(--background-modifier-border)";
+    fromInput.style.background = "var(--background-secondary)";
+    fromInput.style.color = "var(--text-normal)";
+    fromInput.style.width = "150px";
+    fromInput.value = this.filterState.fromDate;
+
+    const toLabel = filterRow2.createEl("label");
+    toLabel.textContent = "To:";
+    toLabel.style.fontSize = "12px";
+    toLabel.style.color = "var(--text-muted)";
+    toLabel.style.fontWeight = "500";
+    toLabel.style.flexShrink = "0";
+
+    const toInput = filterRow2.createEl("input", { type: "date" });
+    toInput.style.fontSize = "12px";
+    toInput.style.padding = "4px 6px";
+    toInput.style.borderRadius = "4px";
+    toInput.style.border = "1px solid var(--background-modifier-border)";
+    toInput.style.background = "var(--background-secondary)";
+    toInput.style.color = "var(--text-normal)";
+    toInput.style.width = "150px";
+    toInput.value = this.filterState.toDate;
+
+    const sourceSelect = filterRow2.createEl("select");
+    sourceSelect.style.fontSize = "12px";
+    sourceSelect.style.padding = "4px 6px";
+    sourceSelect.style.borderRadius = "4px";
+    sourceSelect.style.border = "1px solid var(--background-modifier-border)";
+    sourceSelect.style.background = "var(--background-secondary)";
+    sourceSelect.style.color = "var(--text-normal)";
+    sourceSelect.style.cursor = "pointer";
+    ["all", "auto", "manual"].forEach((val) => {
+      const opt = sourceSelect.createEl("option");
+      opt.value = val;
+      opt.textContent = val === "all" ? "All moves" : val === "auto" ? "Auto only" : "Manual only";
+      if (val === this.filterState.source) opt.selected = true;
+    });
+
+    // Body wrapper — cleared on each filter change (not the full display)
+    const bodyWrapper = containerEl.createDiv();
+
+    const renderBody = () => {
+      bodyWrapper.empty();
+
+      if (checkpoints.length === 0) {
+        // Max checkpoints setting even when empty
+        const emptyRow = bodyWrapper.createDiv();
+        emptyRow.style.marginBottom = "12px";
+        emptyRow.style.display = "flex";
+        emptyRow.style.justifyContent = "flex-start";
+        emptyRow.style.alignItems = "center";
+        const emptyMaxContainer = emptyRow.createDiv();
+        emptyMaxContainer.style.display = "flex";
+        emptyMaxContainer.style.alignItems = "center";
+        emptyMaxContainer.style.gap = "8px";
+        const emptyMaxLabel = emptyMaxContainer.createEl("label");
+        emptyMaxLabel.textContent = "Max checkpoints:";
+        emptyMaxLabel.style.fontSize = "12px";
+        emptyMaxLabel.style.color = "var(--text-muted)";
+        emptyMaxLabel.style.fontWeight = "500";
+        const emptyMaxInput = emptyMaxContainer.createEl("input", { type: "number" });
+        emptyMaxInput.value = this.plugin.settings.undoMaxCheckpoints || 10;
+        emptyMaxInput.min = "0";
+        emptyMaxInput.max = "1000";
+        emptyMaxInput.style.width = "60px";
+        emptyMaxInput.style.fontSize = "12px";
+        emptyMaxInput.style.padding = "2px 4px";
+        emptyMaxInput.title = "Maximum number of checkpoints to store. Set to 0 for unlimited.";
+        emptyMaxInput.onchange = async () => {
+          const val = parseInt(emptyMaxInput.value, 10);
+          if (isNaN(val) || val < 0) {
+            emptyMaxInput.value = this.plugin.settings.undoMaxCheckpoints || 10;
+            new Notice("PropMove: Invalid value. Using current limit.");
+            return;
+          }
+          this.plugin.settings.undoMaxCheckpoints = val;
+          await this.plugin.saveSettings();
+          new Notice(`PropMove: Max checkpoints set to ${val === 0 ? 'unlimited' : val}`);
+        };
+
+        bodyWrapper.createEl("p", {
+          text: "No move history yet. Files moved by PropMove will appear here.",
+          cls: "setting-item-description"
+        });
+        return;
+      }
+
+      // History controls: max checkpoints + clear history
+      const controlsBox = bodyWrapper.createDiv();
+      controlsBox.style.border = "1px solid var(--background-modifier-border)";
+      controlsBox.style.borderRadius = "6px";
+      controlsBox.style.padding = "8px 10px";
+      controlsBox.style.marginBottom = "12px";
+
+      const controlsRow = controlsBox.createDiv();
+      controlsRow.style.display = "flex";
+      controlsRow.style.justifyContent = "space-between";
+      controlsRow.style.alignItems = "center";
+
+      // Max checkpoints setting (left side)
+      const maxSettingContainer = controlsRow.createDiv();
+      maxSettingContainer.style.display = "flex";
+      maxSettingContainer.style.alignItems = "center";
+      maxSettingContainer.style.gap = "8px";
+      const maxLabel = maxSettingContainer.createEl("label");
+      maxLabel.textContent = "Max checkpoints:";
+      maxLabel.style.fontSize = "12px";
+      maxLabel.style.color = "var(--text-muted)";
+      maxLabel.style.fontWeight = "500";
+      const maxInput = maxSettingContainer.createEl("input", { type: "number" });
+      maxInput.value = this.plugin.settings.undoMaxCheckpoints || 10;
+      maxInput.min = "0";
+      maxInput.max = "1000";
+      maxInput.style.width = "60px";
+      maxInput.style.fontSize = "12px";
+      maxInput.style.padding = "2px 4px";
+      maxInput.title = "Maximum number of checkpoints to store. Set to 0 for unlimited.";
+      maxInput.onchange = async () => {
+        const val = parseInt(maxInput.value, 10);
         if (isNaN(val) || val < 0) {
-          emptyMaxInput.value = this.plugin.settings.undoMaxCheckpoints || 10;
+          maxInput.value = this.plugin.settings.undoMaxCheckpoints || 10;
           new Notice("PropMove: Invalid value. Using current limit.");
           return;
         }
         this.plugin.settings.undoMaxCheckpoints = val;
         await this.plugin.saveSettings();
+        await this.plugin.pruneCheckpoints();
         new Notice(`PropMove: Max checkpoints set to ${val === 0 ? 'unlimited' : val}`);
-      };
-
-      containerEl.createEl("p", {
-        text: "No move history yet. Files moved by PropMove will appear here.",
-        cls: "setting-item-description"
-      });
-      return;
-    }
-
-    // Clear history button row + max checkpoints setting
-    const clearRow = containerEl.createDiv();
-    clearRow.style.marginBottom = "12px";
-    clearRow.style.display = "flex";
-    clearRow.style.justifyContent = "space-between";
-    clearRow.style.alignItems = "center";
-
-    // Max checkpoints setting (left side)
-    const maxSettingContainer = clearRow.createDiv();
-    maxSettingContainer.style.display = "flex";
-    maxSettingContainer.style.alignItems = "center";
-    maxSettingContainer.style.gap = "8px";
-    const maxLabel = maxSettingContainer.createEl("label");
-    maxLabel.textContent = "Max checkpoints:";
-    maxLabel.style.fontSize = "12px";
-    maxLabel.style.color = "var(--text-muted)";
-    maxLabel.style.fontWeight = "500";
-    const maxInput = maxSettingContainer.createEl("input", { type: "number" });
-    maxInput.value = this.plugin.settings.undoMaxCheckpoints || 10;
-    maxInput.min = "0";
-    maxInput.max = "1000";
-    maxInput.style.width = "60px";
-    maxInput.style.fontSize = "12px";
-    maxInput.style.padding = "2px 4px";
-    maxInput.title = "Maximum number of checkpoints to store. Set to 0 for unlimited.";
-    maxInput.onchange = async () => {
-      const val = parseInt(maxInput.value, 10);
-      if (isNaN(val) || val < 0) {
-        maxInput.value = this.plugin.settings.undoMaxCheckpoints || 10;
-        new Notice("PropMove: Invalid value. Using current limit.");
-        return;
-      }
-      this.plugin.settings.undoMaxCheckpoints = val;
-      await this.plugin.saveSettings();
-      // Prune if necessary
-      await this.plugin.pruneCheckpoints();
-      new Notice(`PropMove: Max checkpoints set to ${val === 0 ? 'unlimited' : val}`);
-      this.display();
-    };
-
-    // Clear history button (right side)
-    const clearBtn = clearRow.createEl("button");
-    clearBtn.textContent = "Clear history";
-    clearBtn.style.background = "none";
-    clearBtn.style.border = "none";
-    clearBtn.style.cursor = "pointer";
-    clearBtn.style.color = "var(--text-muted)";
-    clearBtn.style.fontSize = "12px";
-    clearBtn.style.padding = "4px 8px";
-    clearBtn.style.borderRadius = "4px";
-    clearBtn.onmouseover = () => { clearBtn.style.color = "var(--text-normal)"; };
-    clearBtn.onmouseout = () => { clearBtn.style.color = "var(--text-muted)"; };
-    clearBtn.onclick = async () => {
-      this.plugin.clearCheckpoints();
-      this.display();
-    };
-
-    // Render each checkpoint as a card (newest first)
-    for (let i = checkpoints.length - 1; i >= 0; i--) {
-      const cp = checkpoints[i];
-
-      // Card container - matches mapping card style
-      const card = containerEl.createDiv();
-      card.style.background = "var(--background-secondary)";
-      card.style.borderRadius = "8px";
-      card.style.padding = "16px";
-      card.style.marginBottom = "12px";
-
-      // Card header: timestamp + source badge + restore button
-      const header = card.createDiv();
-      header.style.display = "flex";
-      header.style.justifyContent = "space-between";
-      header.style.alignItems = "center";
-      header.style.marginBottom = "12px";
-      header.style.borderBottom = "1px solid var(--background-modifier-border)";
-      header.style.paddingBottom = "8px";
-
-      // Left side: timestamp and source
-      const headerLeft = header.createDiv();
-      headerLeft.style.display = "flex";
-      headerLeft.style.alignItems = "center";
-      headerLeft.style.gap = "8px";
-
-      const timeEl = headerLeft.createEl("span", {
-        text: this.formatTimestamp(cp.timestamp)
-      });
-      timeEl.style.fontSize = "13px";
-      timeEl.style.fontWeight = "600";
-      timeEl.title = cp.timestamp;
-
-      // Source badge
-      const sourceBadge = headerLeft.createDiv();
-      sourceBadge.style.fontSize = "10px";
-      sourceBadge.style.fontWeight = "600";
-      sourceBadge.style.textTransform = "uppercase";
-      sourceBadge.style.letterSpacing = "0.5px";
-      sourceBadge.style.padding = "2px 6px";
-      sourceBadge.style.borderRadius = "4px";
-      sourceBadge.textContent = cp.source || "auto";
-      if ((cp.source || "auto") === "manual") {
-        sourceBadge.style.background = "var(--interactive-accent)";
-        sourceBadge.style.color = "var(--text-on-accent)";
-      } else {
-        sourceBadge.style.background = "var(--background-modifier-border)";
-        sourceBadge.style.color = "var(--text-muted)";
-      }
-
-      // Move count badge
-      const countBadge = headerLeft.createDiv();
-      countBadge.style.fontSize = "11px";
-      countBadge.style.color = "var(--text-muted)";
-      countBadge.textContent = `${cp.moveCount} move${cp.moveCount > 1 ? 's' : ''}`;
-
-      // Right side: revert button
-      const restoreBtn = header.createEl("button");
-      restoreBtn.innerHTML = `<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' style='margin-right:4px;vertical-align:middle;'><polyline points='1 4 1 10 7 10'></polyline><path d='M3.51 15a9 9 0 1 0 2.13-9.36L1 10'></path></svg>Undo this & younger moves`;
-      restoreBtn.style.background = "none";
-      restoreBtn.style.border = "1px solid var(--background-modifier-border)";
-      restoreBtn.style.cursor = "pointer";
-      restoreBtn.style.color = "var(--text-normal)";
-      restoreBtn.style.fontSize = "11px";
-      restoreBtn.style.padding = "3px 8px";
-      restoreBtn.style.borderRadius = "4px";
-      restoreBtn.style.display = "flex";
-      restoreBtn.style.alignItems = "center";
-      restoreBtn.style.gap = "2px";
-      restoreBtn.onmouseover = () => {
-        restoreBtn.style.borderColor = "var(--interactive-accent)";
-        restoreBtn.style.color = "var(--text-accent)";
-      };
-      restoreBtn.onmouseout = () => {
-        restoreBtn.style.borderColor = "var(--background-modifier-border)";
-        restoreBtn.style.color = "var(--text-normal)";
-      };
-      restoreBtn.onclick = async () => {
-        const cnt = cp.moves ? cp.moves.length : 0;
-        if (!confirm(`Undo ${cnt} move${cnt !== 1 ? "s" : ""}? This will move files back to their original locations.`)) return;
-        await this.plugin.executeRevert(i);
         this.display();
       };
 
-      // Card body: individual moves (collapsible)
-      const moveCnt = cp.moves ? cp.moves.length : 0;
-      const isExp = this.expandedCheckpoints.has(i);
-      const movesContainer = card.createDiv();
-      movesContainer.style.marginTop = "4px";
-
-      const sr = movesContainer.createDiv();
-      sr.style.display = "flex";
-      sr.style.alignItems = "center";
-      sr.style.gap = "6px";
-      sr.style.cursor = "pointer";
-      sr.style.padding = "4px 2px";
-      sr.style.borderRadius = "4px";
-      sr.style.userSelect = "none";
-      sr.onmouseover = () => { sr.style.backgroundColor = "var(--background-modifier-hover)"; };
-      sr.onmouseout = () => { sr.style.backgroundColor = "transparent"; };
-
-      const tgl = sr.createEl("span");
-      tgl.textContent = isExp ? "\u25BC" : "\u25B6";
-      tgl.style.fontSize = "10px";
-      tgl.style.color = "var(--text-muted)";
-      tgl.style.display = "inline-block";
-
-      const st = sr.createEl("span");
-      st.textContent = `${moveCnt} file${moveCnt !== 1 ? "s" : ""} moved`;
-      st.style.fontSize = "12px";
-      st.style.color = "var(--text-muted)";
-      st.style.flex = "1";
-
-      const dc = card.createDiv();
-      dc.style.display = isExp ? "block" : "none";
-      dc.style.marginTop = "8px";
-
-      sr.onclick = () => {
-        const h = dc.style.display === "none";
-        dc.style.display = h ? "block" : "none";
-        tgl.textContent = h ? "\u25BC" : "\u25B6";
-        if (h) this.expandedCheckpoints.add(i);
-        else this.expandedCheckpoints.delete(i);
+      // Clear history button (right side)
+      const clearBtn = controlsRow.createEl("button");
+      clearBtn.textContent = "Clear history";
+      clearBtn.style.background = "none";
+      clearBtn.style.border = "none";
+      clearBtn.style.cursor = "pointer";
+      clearBtn.style.color = "var(--text-muted)";
+      clearBtn.style.fontSize = "12px";
+      clearBtn.style.padding = "4px 8px";
+      clearBtn.style.borderRadius = "4px";
+      clearBtn.onmouseover = () => { clearBtn.style.color = "var(--text-normal)"; };
+      clearBtn.onmouseout = () => { clearBtn.style.color = "var(--text-muted)"; };
+      clearBtn.onclick = async () => {
+        this.plugin.clearCheckpoints();
+        this.display();
       };
 
-      cp.moves.forEach((m, mIndex) => {
-        const moveRow = dc.createDiv();
-        moveRow.style.display = "flex";
-        moveRow.style.alignItems = "flex-start";
-        moveRow.style.gap = "8px";
-        if (mIndex > 0) {
-          moveRow.style.marginTop = "8px";
-          moveRow.style.paddingTop = "8px";
-          moveRow.style.borderTop = "1px solid var(--background-modifier-border)";
+      const fs = this.filterState;
+
+      // Count visible checkpoints
+      let visibleCount = 0;
+      for (let i = checkpoints.length - 1; i >= 0; i--) {
+        if (this.checkpointMatchesFilter(checkpoints[i], fs)) visibleCount++;
+      }
+
+      if (visibleCount === 0) {
+        bodyWrapper.createEl("p", {
+          text: "No matching history entries.",
+          cls: "setting-item-description"
+        });
+        return;
+      }
+
+      // Render each checkpoint as a card (newest first), skip non-matching
+      for (let i = checkpoints.length - 1; i >= 0; i--) {
+        const cp = checkpoints[i];
+        if (!this.checkpointMatchesFilter(cp, fs)) continue;
+
+        // Card container - matches mapping card style
+        const card = bodyWrapper.createDiv();
+        card.style.background = "var(--background-secondary)";
+        card.style.borderRadius = "8px";
+        card.style.padding = "16px";
+        card.style.marginBottom = "12px";
+
+        // Card header: timestamp + source badge + restore button
+        const header = card.createDiv();
+        header.style.display = "flex";
+        header.style.justifyContent = "space-between";
+        header.style.alignItems = "center";
+        header.style.marginBottom = "12px";
+        header.style.borderBottom = "1px solid var(--background-modifier-border)";
+        header.style.paddingBottom = "8px";
+
+        // Left side: timestamp and source
+        const headerLeft = header.createDiv();
+        headerLeft.style.display = "flex";
+        headerLeft.style.alignItems = "center";
+        headerLeft.style.gap = "8px";
+
+        const timeEl = headerLeft.createEl("span", {
+          text: this.formatTimestamp(cp.timestamp)
+        });
+        timeEl.style.fontSize = "13px";
+        timeEl.style.fontWeight = "600";
+        timeEl.title = cp.timestamp;
+
+        // Source badge
+        const sourceBadge = headerLeft.createDiv();
+        sourceBadge.style.fontSize = "10px";
+        sourceBadge.style.fontWeight = "600";
+        sourceBadge.style.textTransform = "uppercase";
+        sourceBadge.style.letterSpacing = "0.5px";
+        sourceBadge.style.padding = "2px 6px";
+        sourceBadge.style.borderRadius = "4px";
+        sourceBadge.textContent = cp.source || "auto";
+        if ((cp.source || "auto") === "manual") {
+          sourceBadge.style.background = "var(--interactive-accent)";
+          sourceBadge.style.color = "var(--text-on-accent)";
+        } else {
+          sourceBadge.style.background = "var(--background-modifier-border)";
+          sourceBadge.style.color = "var(--text-muted)";
         }
 
-        // Arrow icon
-        const arrowIcon = moveRow.createDiv();
-        arrowIcon.innerHTML = `<svg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='var(--text-muted)' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' style='margin-top:2px;flex-shrink:0;'><line x1='5' y1='12' x2='19' y2='12'></line><polyline points='12 5 19 12 12 19'></polyline></svg>`;
+        // Move count badge
+        const countBadge = headerLeft.createDiv();
+        countBadge.style.fontSize = "11px";
+        countBadge.style.color = "var(--text-muted)";
+        countBadge.textContent = `${cp.moveCount} move${cp.moveCount > 1 ? 's' : ''}`;
 
-        // Move details
-        const moveDetails = moveRow.createDiv();
-        moveDetails.style.flex = "1";
-        moveDetails.style.minWidth = "0";
+        // Right side: revert button
+        const restoreBtn = header.createEl("button");
+        restoreBtn.innerHTML = `<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' style='margin-right:4px;vertical-align:middle;'><polyline points='1 4 1 10 7 10'></polyline><path d='M3.51 15a9 9 0 1 0 2.13-9.36L1 10'></path></svg>Undo this & younger moves`;
+        restoreBtn.style.background = "none";
+        restoreBtn.style.border = "1px solid var(--background-modifier-border)";
+        restoreBtn.style.cursor = "pointer";
+        restoreBtn.style.color = "var(--text-normal)";
+        restoreBtn.style.fontSize = "11px";
+        restoreBtn.style.padding = "3px 8px";
+        restoreBtn.style.borderRadius = "4px";
+        restoreBtn.style.display = "flex";
+        restoreBtn.style.alignItems = "center";
+        restoreBtn.style.gap = "2px";
+        restoreBtn.onmouseover = () => {
+          restoreBtn.style.borderColor = "var(--interactive-accent)";
+          restoreBtn.style.color = "var(--text-accent)";
+        };
+        restoreBtn.onmouseout = () => {
+          restoreBtn.style.borderColor = "var(--background-modifier-border)";
+          restoreBtn.style.color = "var(--text-normal)";
+        };
+        restoreBtn.onclick = async () => {
+          const cnt = cp.moves ? cp.moves.length : 0;
+          if (!confirm(`Undo ${cnt} move${cnt !== 1 ? "s" : ""}? This will move files back to their original locations.`)) return;
+          await this.plugin.executeRevert(i);
+          this.display();
+        };
 
-        // Filename
-        const fileEl = moveDetails.createEl("div");
-        fileEl.style.fontSize = "12px";
-        fileEl.style.fontWeight = "500";
-        fileEl.style.fontFamily = "var(--font-monospace)";
-        fileEl.style.marginBottom = "4px";
-        fileEl.textContent = m.file;
+        // Card body: individual moves (collapsible)
+        const moveCnt = cp.moves ? cp.moves.length : 0;
+        const isExp = this.expandedCheckpoints.has(i);
+        const movesContainer = card.createDiv();
+        movesContainer.style.marginTop = "4px";
 
-        // From/To paths
-        const pathsEl = moveDetails.createDiv();
-        pathsEl.style.display = "flex";
-        pathsEl.style.alignItems = "center";
-        pathsEl.style.gap = "6px";
-        pathsEl.style.fontSize = "11px";
-        pathsEl.style.fontFamily = "var(--font-monospace)";
+        const sr = movesContainer.createDiv();
+        sr.style.display = "flex";
+        sr.style.alignItems = "center";
+        sr.style.gap = "6px";
+        sr.style.cursor = "pointer";
+        sr.style.padding = "4px 2px";
+        sr.style.borderRadius = "4px";
+        sr.style.userSelect = "none";
+        sr.onmouseover = () => { sr.style.backgroundColor = "var(--background-modifier-hover)"; };
+        sr.onmouseout = () => { sr.style.backgroundColor = "transparent"; };
 
-        const fromEl = pathsEl.createEl("span");
-        fromEl.style.color = "var(--text-muted)";
-        fromEl.style.whiteSpace = "nowrap";
-        fromEl.style.overflow = "hidden";
-        fromEl.style.textOverflow = "ellipsis";
-        fromEl.textContent = m.from;
-        fromEl.title = m.from;
+        const tgl = sr.createEl("span");
+        tgl.textContent = isExp ? "\u25BC" : "\u25B6";
+        tgl.style.fontSize = "10px";
+        tgl.style.color = "var(--text-muted)";
+        tgl.style.display = "inline-block";
 
-        const arrow = pathsEl.createEl("span");
-        arrow.style.color = "var(--text-muted)";
-        arrow.style.flexShrink = "0";
-        arrow.textContent = "\u2192";
+        const st = sr.createEl("span");
+        st.textContent = `${moveCnt} file${moveCnt !== 1 ? "s" : ""} moved`;
+        st.style.fontSize = "12px";
+        st.style.color = "var(--text-muted)";
+        st.style.flex = "1";
 
-        const toEl = pathsEl.createEl("span");
-        toEl.style.color = "var(--text-normal)";
-        toEl.style.whiteSpace = "nowrap";
-        toEl.style.overflow = "hidden";
-        toEl.style.textOverflow = "ellipsis";
-        toEl.textContent = m.to;
-        toEl.title = m.to;
+        const dc = card.createDiv();
+        dc.style.display = isExp ? "block" : "none";
+        dc.style.marginTop = "8px";
 
-        // Rule tag (if present)
-        if (m.rule) {
-          const ruleEl = moveDetails.createEl("div");
-          ruleEl.style.marginTop = "4px";
-          const ruleBadge = ruleEl.createDiv();
-          ruleBadge.style.display = "inline-block";
-          ruleBadge.style.fontSize = "10px";
-          ruleBadge.style.fontFamily = "var(--font-monospace)";
-          ruleBadge.style.padding = "1px 6px";
-          ruleBadge.style.borderRadius = "3px";
-          ruleBadge.style.background = "var(--background-modifier-border)";
-          ruleBadge.style.color = "var(--text-muted)";
-          ruleBadge.textContent = m.rule;
-        }
-      });
+        sr.onclick = () => {
+          const h = dc.style.display === "none";
+          dc.style.display = h ? "block" : "none";
+          tgl.textContent = h ? "\u25BC" : "\u25B6";
+          if (h) this.expandedCheckpoints.add(i);
+          else this.expandedCheckpoints.delete(i);
+        };
+
+        cp.moves.forEach((m, mIndex) => {
+          const moveRow = dc.createDiv();
+          moveRow.style.display = "flex";
+          moveRow.style.alignItems = "flex-start";
+          moveRow.style.gap = "8px";
+          if (mIndex > 0) {
+            moveRow.style.marginTop = "8px";
+            moveRow.style.paddingTop = "8px";
+            moveRow.style.borderTop = "1px solid var(--background-modifier-border)";
+          }
+
+          // Arrow icon
+          const arrowIcon = moveRow.createDiv();
+          arrowIcon.innerHTML = `<svg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='var(--text-muted)' stroke-width='2' stroke-linecap='round' stroke-linejoin='round' style='margin-top:2px;flex-shrink:0;'><line x1='5' y1='12' x2='19' y2='12'></line><polyline points='12 5 19 12 12 19'></polyline></svg>`;
+
+          // Move details
+          const moveDetails = moveRow.createDiv();
+          moveDetails.style.flex = "1";
+          moveDetails.style.minWidth = "0";
+
+          // Filename
+          const fileEl = moveDetails.createEl("div");
+          fileEl.style.fontSize = "12px";
+          fileEl.style.fontWeight = "500";
+          fileEl.style.fontFamily = "var(--font-monospace)";
+          fileEl.style.marginBottom = "4px";
+          fileEl.textContent = m.file;
+
+          // From/To paths
+          const pathsEl = moveDetails.createDiv();
+          pathsEl.style.display = "flex";
+          pathsEl.style.alignItems = "center";
+          pathsEl.style.gap = "6px";
+          pathsEl.style.fontSize = "11px";
+          pathsEl.style.fontFamily = "var(--font-monospace)";
+
+          const fromEl = pathsEl.createEl("span");
+          fromEl.style.color = "var(--text-muted)";
+          fromEl.style.whiteSpace = "nowrap";
+          fromEl.style.overflow = "hidden";
+          fromEl.style.textOverflow = "ellipsis";
+          fromEl.textContent = m.from;
+          fromEl.title = m.from;
+
+          const arrow = pathsEl.createEl("span");
+          arrow.style.color = "var(--text-muted)";
+          arrow.style.flexShrink = "0";
+          arrow.textContent = "\u2192";
+
+          const toEl = pathsEl.createEl("span");
+          toEl.style.color = "var(--text-normal)";
+          toEl.style.whiteSpace = "nowrap";
+          toEl.style.overflow = "hidden";
+          toEl.style.textOverflow = "ellipsis";
+          toEl.textContent = m.to;
+          toEl.title = m.to;
+
+          // Rule tag (if present)
+          if (m.rule) {
+            const ruleEl = moveDetails.createEl("div");
+            ruleEl.style.marginTop = "4px";
+            const ruleBadge = ruleEl.createDiv();
+            ruleBadge.style.display = "inline-block";
+            ruleBadge.style.fontSize = "10px";
+            ruleBadge.style.fontFamily = "var(--font-monospace)";
+            ruleBadge.style.padding = "1px 6px";
+            ruleBadge.style.borderRadius = "3px";
+            ruleBadge.style.background = "var(--background-modifier-border)";
+            ruleBadge.style.color = "var(--text-muted)";
+            ruleBadge.textContent = m.rule;
+          }
+        });
+      }
+    };
+
+    renderBody();
+
+    // Event handlers — each updates its field, then re-renders only bodyWrapper
+    textInput.oninput = () => {
+      this.filterState.text = textInput.value;
+      renderBody();
+    };
+    fromInput.onchange = () => {
+      this.filterState.fromDate = fromInput.value;
+      renderBody();
+    };
+    toInput.onchange = () => {
+      this.filterState.toDate = toInput.value;
+      renderBody();
+    };
+    sourceSelect.onchange = () => {
+      this.filterState.source = sourceSelect.value;
+      renderBody();
+    };
+  }
+
+  /**
+   * Check if a checkpoint matches the current filter state.
+   * Applied as AND logic — all active fields must pass.
+   */
+  checkpointMatchesFilter(cp, state) {
+    // Text search — match on file, from, or to
+    if (state.text) {
+      const q = state.text.toLowerCase();
+      if (!(cp.moves && cp.moves.some(m =>
+        (m.file && m.file.toLowerCase().includes(q)) ||
+        (m.from && m.from.toLowerCase().includes(q)) ||
+        (m.to && m.to.toLowerCase().includes(q))
+      ))) return false;
     }
+    // Source filter
+    if (state.source && state.source !== "all") {
+      if ((cp.source || "auto") !== state.source) return false;
+    }
+    // Date from
+    if (state.fromDate) {
+      const fromTime = new Date(state.fromDate).getTime();
+      const cpTime = new Date(cp.timestamp).getTime();
+      if (isNaN(fromTime) || cpTime < fromTime) return false;
+    }
+    // Date to (end of day)
+    if (state.toDate) {
+      const toDate = new Date(state.toDate);
+      toDate.setHours(23, 59, 59, 999);
+      const toTime = toDate.getTime();
+      const cpTime = new Date(cp.timestamp).getTime();
+      if (isNaN(toTime) || cpTime > toTime) return false;
+    }
+    return true;
   }
 }
 
