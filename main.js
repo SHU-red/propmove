@@ -2482,12 +2482,12 @@ const mappings = Array.isArray(group.mappings) ? group.mappings : [];
 
     const fromInput = filterRow2.createEl("input", { type: "date" });
     fromInput.style.fontSize = "12px";
-    fromInput.style.padding = "4px 6px";
+    fromInput.style.padding = "4px 28px 4px 30px";
     fromInput.style.borderRadius = "4px";
     fromInput.style.border = "1px solid var(--background-modifier-border)";
     fromInput.style.background = "var(--background-secondary)";
     fromInput.style.color = "var(--text-normal)";
-    fromInput.style.width = "150px";
+    fromInput.style.width = "170px";
     fromInput.value = this.filterState.fromDate;
 
     const toLabel = filterRow2.createEl("label");
@@ -2499,12 +2499,12 @@ const mappings = Array.isArray(group.mappings) ? group.mappings : [];
 
     const toInput = filterRow2.createEl("input", { type: "date" });
     toInput.style.fontSize = "12px";
-    toInput.style.padding = "4px 6px";
+    toInput.style.padding = "4px 28px 4px 30px";
     toInput.style.borderRadius = "4px";
     toInput.style.border = "1px solid var(--background-modifier-border)";
     toInput.style.background = "var(--background-secondary)";
     toInput.style.color = "var(--text-normal)";
-    toInput.style.width = "150px";
+    toInput.style.width = "170px";
     toInput.value = this.filterState.toDate;
 
     const sourceSelect = filterRow2.createEl("select");
@@ -2648,13 +2648,30 @@ const mappings = Array.isArray(group.mappings) ? group.mappings : [];
         return;
       }
 
+      // Collapsible wrapper around the entry list
+      const details = bodyWrapper.createEl("details");
+      details.style.marginTop = "8px";
+
+      // Auto-expand when any filter is active — user wants to see results
+      const hasActiveFilter = fs.text || fs.fromDate || fs.toDate || fs.source !== "all";
+      if (hasActiveFilter) details.open = true;
+
+      const summary = details.createEl("summary");
+      summary.textContent = `Move History (${visibleCount} entry${visibleCount !== 1 ? 's' : ''})`;
+      summary.style.cursor = "pointer";
+      summary.style.fontSize = "12px";
+      summary.style.fontWeight = "600";
+      summary.style.color = "var(--text-muted)";
+      summary.style.padding = "4px 0";
+      summary.style.userSelect = "none";
+
       // Render each checkpoint as a card (newest first), skip non-matching
       for (let i = checkpoints.length - 1; i >= 0; i--) {
         const cp = checkpoints[i];
         if (!this.checkpointMatchesFilter(cp, fs)) continue;
 
         // Card container - matches mapping card style
-        const card = bodyWrapper.createDiv();
+        const card = details.createDiv();
         card.style.background = "var(--background-secondary)";
         card.style.borderRadius = "8px";
         card.style.padding = "16px";
