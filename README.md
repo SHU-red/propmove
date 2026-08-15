@@ -2,9 +2,11 @@
 
 Automatically move notes based on frontmatter properties. **It just works.**
 
-> 💡 **Built with AI** — This plugin is developed and maintained via AI agents.
-> I use AI as my primary tool for implementation, issue handling, and maintenance.
-> You are free to choose whether to use this plugin based on that.
+> ☕ **Buy Me A Coffee**
+> These are small tools, built with AI — on purpose. There isn't enough time to learn every language and dive into every rabbit hole, so AI lets me solve real problems from my daily life and homelab — and that matters more to me than clever code.
+> The AI writes most of the code; the idea, the tinkering, testing, publishing and maintenance are mine.
+> Issues answered, features shipped, a few stars and downloads — does that sound like AI slop? Take a look and make your own opinion.
+> If this project helps you, [buy me a coffee](https://www.buymeacoffee.com/yffbptmtaa) ☕
 
 <a href="https://www.buymeacoffee.com/yffbptmtaa" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-violet.png" alt="Buy Me A Coffee" style="height: 60px !important;width: 217px !important;" ></a>
 
