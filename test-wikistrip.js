@@ -1,4 +1,5 @@
-// Test: stripWikiLink from main.js
+// Tests for main.js: stripWikiLink, interpolateVariables, mapping operators,
+// folder rename updates.
 // Run: node test-wikistrip.js
 
 // Mock obsidian module BEFORE requiring main.js
@@ -18,10 +19,18 @@ const mockObsidian = {
   normalizePath: (p) => p,
   Notice: class Notice {},
   Command: class Command {},
+  Modal: class Modal {},
 };
 require.cache['/mock/obsidian.js'] = { exports: mockObsidian };
 
-const { stripWikiLink } = require('./main.js');
+const { stripWikiLink, FileProcessor } = require('./main.js');
+
+// --- Shared test helpers ---
+const noopLogger = { debug() {}, info() {}, warn() {}, error() {} };
+
+function makeProcessor(settings) {
+  return new FileProcessor({ vault: {}, metadataCache: {} }, settings, noopLogger);
+}
 
 // --- stripWikiLink unit tests ---
 const unitTests = [
@@ -52,16 +61,10 @@ for (const [input, expected, desc] of unitTests) {
   }
 }
 
-// --- Integration: full interpolateVariables pipeline ---
-function interpolateVariables(path, frontmatter) {
-  return path.replace(/{(\w+)}/g, (match, propName) => {
-    const value = frontmatter[propName];
-    if (value === null || value === undefined) return match;
-    let normalized = String(value).trim();
-    if (!normalized) return match;
-    normalized = stripWikiLink(normalized);
-    return normalized;
-  });
+// --- Integration: full interpolateVariables pipeline (real FileProcessor) ---
+function interpolateVariables(path, frontmatter, ruleContext) {
+  return makeProcessor({ properties: [], caseInsensitiveMatching: false })
+    .interpolateVariables(path, frontmatter, null, ruleContext);
 }
 
 const integrationTests = [
@@ -80,6 +83,32 @@ for (const [path, fm, expected, desc] of integrationTests) {
   console.log(ok ? 'PASS' : 'FAIL', desc);
   if (!ok) {
     console.log(`  input:    path="${path}" fm=${JSON.stringify(fm)}`);
+    console.log(`  expected: ${expected}`);
+    console.log(`  got:      ${result}`);
+  }
+}
+
+// --- Multi-value (Obsidian "List") interpolation: real FileProcessor ---
+// [path, frontmatter, ruleContext, expected, desc]
+const arrayInterpolationTests = [
+  ['{type}', { type: ['book'] }, undefined, 'book', 'single-element list'],
+  ['{type}', { type: ['book', 'note'] }, undefined, 'book', 'multi-value list uses first value (no comma folder)'],
+  ['{type}', { type: ['', 'note'] }, undefined, 'note', 'blank first element skipped'],
+  ['{type}', { type: ['', ''] }, undefined, '{type}', 'all-blank list kept literal'],
+  ['{type}', { type: [] }, undefined, '{type}', 'empty list kept literal'],
+  ['{type}/{name}', { type: ['book', 'note'], name: 'x' }, undefined, 'book/x', 'multi-value alongside scalar var'],
+  ['Shelf/{type}', { type: ['book', 'note'] }, { property: 'type', value: 'note' }, 'Shelf/note', 'matched element wins over first'],
+  ['{type}', { type: ['book', 'note'] }, { property: 'status', value: 'note' }, 'book', 'rule on another property falls back to first'],
+  ['{type}', { type: ['[[Alpha]]', '[[Beta]]'] }, undefined, 'Alpha', 'list of wiki-links'],
+];
+
+for (const [path, fm, ctx, expected, desc] of arrayInterpolationTests) {
+  const result = interpolateVariables(path, fm, ctx);
+  const ok = result === expected;
+  if (ok) pass++; else fail++;
+  console.log(ok ? 'PASS' : 'FAIL', desc);
+  if (!ok) {
+    console.log(`  input:    path="${path}" fm=${JSON.stringify(fm)} ctx=${JSON.stringify(ctx)}`);
     console.log(`  expected: ${expected}`);
     console.log(`  got:      ${result}`);
   }
@@ -386,48 +415,15 @@ for (const test of renameTests) {
   }
 }
 
-// --- Operator matching tests ---
+// --- Operator matching tests (real FileProcessor.findMatchingMapping) ---
 function simulateFindMatchingMapping(mappings, normalizedValues, settings) {
-  const caseInsensitive = settings.caseInsensitiveMatching || false;
-  for (const item of mappings) {
-    const operator = (item.operator || "equals").trim();
-    const mappingValue = String(item.value || "").trim();
-
-    // Presence operators
-    if (operator === "is-empty") {
-      if (normalizedValues.length === 0) return item;
-      continue;
-    }
-    if (operator === "is-not-empty") {
-      if (normalizedValues.length > 0) return item;
-      continue;
-    }
-
-    if (mappingValue.length === 0) continue;
-
-    // Wildcard
-    if (mappingValue === "*") {
-      if (normalizedValues.length > 0) return item;
-      continue;
-    }
-
-    let isMatch;
-    if (operator === "contains") {
-      const check = caseInsensitive ? mappingValue.toLowerCase() : mappingValue;
-      isMatch = normalizedValues.some(v => {
-        const val = caseInsensitive ? v.toLowerCase() : v;
-        return val.includes(check);
-      });
-    } else {
-      // equals
-      isMatch = caseInsensitive
-        ? normalizedValues.some(v => v.toLowerCase() === mappingValue.toLowerCase())
-        : normalizedValues.includes(mappingValue);
-    }
-
-    if (isMatch) return item;
-  }
-  return null;
+  const processor = makeProcessor({
+    properties: [],
+    mappings: [],
+    caseInsensitiveMatching: !!settings.caseInsensitiveMatching
+  });
+  const result = processor.findMatchingMapping(mappings, normalizedValues, null, 'test');
+  return result ? result.mapping : null;
 }
 
 const operatorTests = [
@@ -514,6 +510,74 @@ for (const test of operatorTests) {
   }
 }
 
-const total = unitTests.length + integrationTests.length + renameTests.length + operatorTests.length;
+// --- Matched-value tests: real findMatchingMapping return shape ---
+const matchValueTests = [
+  { desc: "equals returns the matched element",
+    mappings: [{ value: 'note', folder: 'X' }],
+    values: ['book', 'note'], settings: {}, expectValue: 'note' },
+  { desc: "contains returns the matched element",
+    mappings: [{ value: 'book', folder: 'X', operator: 'contains' }],
+    values: ['note', 'bookish'], settings: {}, expectValue: 'bookish' },
+  { desc: "wildcard returns null matchedValue",
+    mappings: [{ value: '*', folder: 'X' }],
+    values: ['book', 'note'], settings: {}, expectValue: null },
+  { desc: "is-not-empty returns null matchedValue",
+    mappings: [{ value: '', folder: 'X', operator: 'is-not-empty' }],
+    values: ['a', 'b'], settings: {}, expectValue: null },
+];
+
+for (const test of matchValueTests) {
+  const processor = makeProcessor({ properties: [], caseInsensitiveMatching: !!test.settings.caseInsensitiveMatching });
+  const result = processor.findMatchingMapping(test.mappings, test.values, null, 'test');
+  const actual = result ? result.matchedValue : null;
+  const ok = actual === test.expectValue;
+  if (ok) pass++; else fail++;
+  console.log(ok ? 'PASS' : 'FAIL', test.desc);
+  if (!ok) {
+    console.log(`  expected: ${JSON.stringify(test.expectValue)}`);
+    console.log(`  got:      ${JSON.stringify(actual)}`);
+  }
+}
+
+// --- End-to-end target resolution: real findTargetFolder + interpolateVariables ---
+const targetFolderTests = [
+  { desc: "reported bug: wildcard + {type} on multi-value List",
+    settings: { properties: [{ name: 'type', mappings: [{ value: '*', folder: 'Notes/{type}' }] }] },
+    frontmatter: { type: ['book', 'note'] },
+    expect: 'Notes/book' },
+  { desc: "equals on later element uses matched value",
+    settings: { properties: [{ name: 'type', mappings: [{ value: 'note', folder: 'Shelf/{type}' }] }] },
+    frontmatter: { type: ['book', 'note'] },
+    expect: 'Shelf/note' },
+  { desc: "wildcard scalar unchanged",
+    settings: { properties: [{ name: 'type', mappings: [{ value: '*', folder: 'Notes/{type}' }] }] },
+    frontmatter: { type: 'book' },
+    expect: 'Notes/book' },
+  { desc: "static folder unaffected by multi-value",
+    settings: { properties: [{ name: 'type', mappings: [{ value: '*', folder: 'Notes' }] }] },
+    frontmatter: { type: ['book', 'note'] },
+    expect: 'Notes' },
+];
+
+for (const test of targetFolderTests) {
+  const processor = makeProcessor({ caseInsensitiveMatching: false, ...test.settings });
+  const resolved = processor.findTargetFolder(test.frontmatter);
+  const actual = resolved
+    ? processor.interpolateVariables(resolved.targetFolder, test.frontmatter, null, {
+        property: resolved.ruleName,
+        value: resolved.ruleValue
+      })
+    : null;
+  const ok = actual === test.expect;
+  if (ok) pass++; else fail++;
+  console.log(ok ? 'PASS' : 'FAIL', test.desc);
+  if (!ok) {
+    console.log(`  expected: ${test.expect}`);
+    console.log(`  got:      ${actual}`);
+  }
+}
+
+const total = unitTests.length + integrationTests.length + arrayInterpolationTests.length +
+  renameTests.length + operatorTests.length + matchValueTests.length + targetFolderTests.length;
 console.log(`\n${pass}/${total} passed`);
 process.exit(fail > 0 ? 1 : 0);

@@ -66,12 +66,21 @@ class FileProcessor {
       const mapping = this.findMatchingMapping(mappings, normalizedValues, rawValue, propName);
 
       if (mapping) {
-        const targetFolder = String(mapping.folder || "").trim();
+        const targetFolder = String(mapping.mapping.folder || "").trim();
         if (targetFolder) {
+          // Prefer the element that actually matched the rule. Wildcard and
+          // presence operators match no specific element, so fall back to the
+          // first non-empty value.
+          const ruleValue = mapping.matchedValue !== null && mapping.matchedValue !== undefined
+            ? mapping.matchedValue
+            : normalizedValues[0];
+          if ((mapping.matchedValue === null || mapping.matchedValue === undefined) && normalizedValues.length > 1) {
+            this.logger.debug(`[MATCH] "${propName}" is multi-valued and matched by wildcard/presence; folder template uses first value: ${ruleValue}`);
+          }
           return {
             targetFolder,
             ruleName: propName,
-            ruleValue: normalizedValues[0]
+            ruleValue
           };
         }
       }
@@ -85,6 +94,9 @@ class FileProcessor {
    * Supports: wildcard '*', operator field (equals, contains, is-empty, is-not-empty)
    */
   findMatchingMapping(mappings, normalizedValues, rawFrontmatterValue, propName) {
+    // Returns { mapping, matchedValue }. matchedValue is the array element that
+    // satisfied a value operator, or null when nothing specific matched
+    // (wildcard / presence operators) so callers fall back to the first value.
     for (const item of mappings) {
       const operator = (item.operator || "equals").trim();
       const mappingValue = String(item.value || "").trim();
@@ -93,7 +105,7 @@ class FileProcessor {
       if (operator === "is-empty") {
         if (normalizedValues.length === 0) {
           this.logger.debug(`[MATCH] is-empty matched for "${propName}"`);
-          return item;
+          return { mapping: item, matchedValue: null };
         }
         continue;
       }
@@ -101,7 +113,7 @@ class FileProcessor {
       if (operator === "is-not-empty") {
         if (normalizedValues.length > 0) {
           this.logger.debug(`[MATCH] is-not-empty matched for "${propName}"`);
-          return item;
+          return { mapping: item, matchedValue: null };
         }
         continue;
       }
@@ -109,32 +121,35 @@ class FileProcessor {
       // --- Value operators ---
       if (mappingValue.length === 0) continue;
 
-      // Wildcard match - '*' matches any non-empty value
+      // Wildcard match - '*' matches any non-empty value. No specific element
+      // matched, so matchedValue stays null.
       if (mappingValue === "*") {
         if (normalizedValues.length > 0) {
           this.logger.debug(`[MATCH] Wildcard matched with value: ${normalizedValues[0]}`);
-          return item;
+          return { mapping: item, matchedValue: null };
         }
         continue;
       }
 
-      let isMatch;
+      const caseInsensitive = this.settings.caseInsensitiveMatching;
+      let matchedValue;
       if (operator === "contains") {
-        const check = this.settings.caseInsensitiveMatching
-          ? mappingValue.toLowerCase()
-          : mappingValue;
-        isMatch = normalizedValues.some(v => {
-          const val = this.settings.caseInsensitiveMatching ? v.toLowerCase() : v;
+        const check = caseInsensitive ? mappingValue.toLowerCase() : mappingValue;
+        matchedValue = normalizedValues.find(v => {
+          const val = caseInsensitive ? v.toLowerCase() : v;
           return val.includes(check);
         });
       } else {
         // Default: equals
-        isMatch = this.settings.caseInsensitiveMatching
-          ? normalizedValues.some(v => v.toLowerCase() === mappingValue.toLowerCase())
-          : normalizedValues.includes(mappingValue);
+        matchedValue = normalizedValues.find(v =>
+          caseInsensitive ? v.toLowerCase() === mappingValue.toLowerCase() : v === mappingValue
+        );
       }
 
-      if (isMatch) return item;
+      if (matchedValue !== undefined) {
+        this.logger.debug(`[MATCH] ${operator} matched "${propName}" with value: ${matchedValue}`);
+        return { mapping: item, matchedValue };
+      }
     }
     return null;
   }
@@ -146,9 +161,10 @@ class FileProcessor {
    * @param {string} path - Path template with {variable} placeholders
    * @param {Object} frontmatter - Frontmatter object with properties
    * @param {Object} [file] - TFile instance for {file.*} variables
+   * @param {{property: string, value: string}} [ruleContext] - Property and matched value of the rule that selected the target, so multi-value properties resolve to the value that actually matched
    * @returns {string} Interpolated path
    */
-  interpolateVariables(path, frontmatter, file) {
+  interpolateVariables(path, frontmatter, file, ruleContext) {
     if (!path || typeof path !== 'string') return path;
 
     const FILE_VARIABLES = {
@@ -204,7 +220,34 @@ class FileProcessor {
         return match;
       }
 
-      var normalized = String(value).trim();
+      var normalized;
+      if (ruleContext && ruleContext.property === key && ruleContext.value !== null && ruleContext.value !== undefined) {
+        // The rule that selected this folder matched on this property; use the
+        // element that actually matched rather than the raw frontmatter value.
+        normalized = String(ruleContext.value).trim();
+      } else if (Array.isArray(value)) {
+        // Obsidian "List" property. String(array) joins with commas ("a,b"),
+        // which becomes a literal folder name. Use the first non-empty element.
+        var firstValue = null;
+        for (var i = 0; i < value.length; i++) {
+          var candidate = String(value[i]).trim();
+          if (candidate.length > 0) {
+            firstValue = candidate;
+            break;
+          }
+        }
+        if (firstValue === null) {
+          that.logger.debug('[INTERPOLATE] Property \'' + key + '\' has no non-empty value, keeping literal: ' + match);
+          return match;
+        }
+        if (value.length > 1) {
+          that.logger.debug('[INTERPOLATE] Property \'' + key + '\' is multi-valued, using first value: ' + firstValue);
+        }
+        normalized = firstValue;
+      } else {
+        normalized = String(value).trim();
+      }
+
       if (normalized.length === 0) {
         that.logger.debug('[INTERPOLATE] Property \'' + key + '\' is empty, keeping literal: ' + match);
         return match;
@@ -233,7 +276,10 @@ class FileProcessor {
     }
 
     // Interpolate variables in the target folder
-    const interpolatedFolder = this.interpolateVariables(targetResult.targetFolder, frontmatter, file);
+    const interpolatedFolder = this.interpolateVariables(targetResult.targetFolder, frontmatter, file, {
+      property: targetResult.ruleName,
+      value: targetResult.ruleValue
+    });
     const normalizedFolder = normalizePath(interpolatedFolder);
     const targetPath = normalizePath(`${normalizedFolder}/${file.name}`);
 
@@ -294,12 +340,12 @@ class FileProcessor {
   /**
    * Execute a file move operation with comprehensive error handling
    */
-  async moveFile(file, targetFolder) {
+  async moveFile(file, targetFolder, ruleContext) {
     // Interpolate variables from file's frontmatter
     const cache = this.app.metadataCache.getFileCache(file);
     const frontmatter = cache ? cache.frontmatter : null;
     const interpolatedFolder = frontmatter 
-      ? this.interpolateVariables(targetFolder, frontmatter, file)
+      ? this.interpolateVariables(targetFolder, frontmatter, file, ruleContext)
       : targetFolder;
 
     const normalizedFolder = normalizePath(interpolatedFolder);
@@ -1017,7 +1063,10 @@ module.exports = class PropMove extends Plugin {
 
     try {
       this.movingPaths.add(file.path);
-      const result = await this.fileProcessor.moveFile(file, targetResult.targetFolder);
+      const result = await this.fileProcessor.moveFile(file, targetResult.targetFolder, {
+        property: targetResult.ruleName,
+        value: targetResult.ruleValue
+      });
 
       // Notify user of specific failures (only when notifications are enabled)
       if (!result.success && result.message) {
@@ -1308,6 +1357,7 @@ module.exports = class PropMove extends Plugin {
 
 // Export for testing
 module.exports.stripWikiLink = stripWikiLink;
+module.exports.FileProcessor = FileProcessor;
 
 /**
  * Collect all unique frontmatter property keys from the vault
