@@ -1457,7 +1457,7 @@ function collectVaultFolders(app) {
  * Replaces HTML <datalist> which cannot be constrained with max-height.
  *
  * Features:
- * - Scrollable suggestion list attached to document.body (avoids parent overflow clipping)
+ * - Scrollable suggestion list attached to the owning window's body (avoids parent overflow clipping)
  * - Filters suggestions as user types
  * - Arrow key navigation (up/down) + Enter to select
  * - Escape to close
@@ -1467,12 +1467,16 @@ function collectVaultFolders(app) {
 /**
  * Create a suggest input: text field + scrollable dropdown suggestions.
  * - Text input allows arbitrary typed values (not restricted to suggestions).
- * - Dropdown is attached to document.body to avoid parent overflow clipping.
+ * - Dropdown is attached to the owning window's body to avoid parent overflow clipping.
  * - Filters suggestions as user types.
  * - Arrow key navigation (up/down) + Enter to select.
  * - Escape to close. Click outside to close.
  */
 function createSuggestInput(container, options) {
+  // Obsidian 1.13+ opens settings in a separate window; plugin code's global
+  // document/window still point at the main window, so use the container's.
+  const doc = container.ownerDocument;
+  const win = doc.defaultView;
   const wrapper = container.createDiv('suggest-input-wrapper');
   wrapper.style.position = 'relative';
   wrapper.style.width = options.wrapperWidth || '100%';
@@ -1514,7 +1518,7 @@ function createSuggestInput(container, options) {
     const filtered = suggestionsRef.current.filter(s => s.toLowerCase().includes(filter));
     if (filtered.length === 0) return;
 
-    dropdown = document.body.createDiv('propmove-suggest-dropdown');
+    dropdown = doc.body.createDiv('propmove-suggest-dropdown');
     dropdown.style.position = 'absolute';
     dropdown.style.zIndex = '10000';
     dropdown.style.maxHeight = '200px';
@@ -1624,11 +1628,11 @@ function createSuggestInput(container, options) {
       hideDropdown();
     }
   };
-  document.addEventListener('click', clickOutside);
+  doc.addEventListener('click', clickOutside);
 
   // Reposition on scroll/resize
-  window.addEventListener('scroll', positionDropdown, true);
-  window.addEventListener('resize', positionDropdown);
+  win.addEventListener('scroll', positionDropdown, true);
+  win.addEventListener('resize', positionDropdown);
 
   return {
     input,
@@ -1639,9 +1643,9 @@ function createSuggestInput(container, options) {
       if (dropdown) showDropdown();
     },
     destroy: function() {
-      document.removeEventListener('click', clickOutside);
-      window.removeEventListener('scroll', positionDropdown, true);
-      window.removeEventListener('resize', positionDropdown);
+      doc.removeEventListener('click', clickOutside);
+      win.removeEventListener('scroll', positionDropdown, true);
+      win.removeEventListener('resize', positionDropdown);
       hideDropdown();
       if (wrapper && wrapper.parentNode) {
         wrapper.parentNode.removeChild(wrapper);
