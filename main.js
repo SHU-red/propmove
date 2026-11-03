@@ -1441,6 +1441,20 @@ function collectVaultFolders(app) {
 }
 
 /**
+ * Run confirm() in the window that owns the given element.
+ * Plugin settings can live in a separate Obsidian window; the global confirm()
+ * would put the native dialog in the main window and raise it above the
+ * settings window. Focusing the owning window afterwards keeps it in front.
+ */
+function confirmInWindow(containerEl, message) {
+  const win = containerEl && containerEl.ownerDocument && containerEl.ownerDocument.defaultView;
+  if (!win || win === window) return confirm(message);
+  const accepted = win.confirm(message);
+  win.focus();
+  return accepted;
+}
+
+/**
  * PropMoveSuggestInput - Custom autocomplete input with scrollable dropdown.
  * Replaces HTML <datalist> which cannot be constrained with max-height.
  *
@@ -2208,7 +2222,7 @@ class PropMoveSettingTab extends PluginSettingTab {
       tr.onclick = async (e) => {
         e.stopPropagation();
         const name = group.name || 'this mapping';
-        if (!confirm("Remove " + name + "?")) return;
+        if (!confirmInWindow(this.containerEl, "Remove " + name + "?")) return;
         this.plugin.settings.properties.splice(groupIndex, 1);
         await this.plugin.saveSettings();
         this.display();
@@ -2374,7 +2388,7 @@ const mappings = Array.isArray(group.mappings) ? group.mappings : [];
         mapTrash.style.alignItems = "center";
         mapTrash.title = "Remove mapping";
         mapTrash.onclick = async () => {
-          if (!confirm("Remove this mapping rule?")) return;
+          if (!confirmInWindow(this.containerEl, "Remove this mapping rule?")) return;
           mappings.splice(index, 1);
           group.mappings = mappings;
           await this.plugin.saveSettings();
@@ -2441,7 +2455,7 @@ const mappings = Array.isArray(group.mappings) ? group.mappings : [];
 
     containerEl.createEl("hr");
     this.renderHistorySection(containerEl);
-    setTimeout(() => { if (sc) sc.scrollTop = sp; }, 0);
+    if (sc) sc.scrollTop = sp;
   }
 
   /**
@@ -2799,7 +2813,7 @@ const mappings = Array.isArray(group.mappings) ? group.mappings : [];
         };
         restoreBtn.onclick = async () => {
           const cnt = cp.moves ? cp.moves.length : 0;
-          if (!confirm(`Undo ${cnt} move${cnt !== 1 ? "s" : ""}? This will move files back to their original locations.`)) return;
+          if (!confirmInWindow(this.containerEl, `Undo ${cnt} move${cnt !== 1 ? "s" : ""}? This will move files back to their original locations.`)) return;
           await this.plugin.executeRevert(i);
           this.display();
         };
